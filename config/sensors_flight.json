@@ -1,0 +1,107 @@
+{
+  "frames": {
+    "world": "ENU, x east, y north, z up, metres",
+    "body": "FLU, x forward, y left, z up (gz link frame)",
+    "lidar": "beam d_L = (0, sin(beta), -cos(beta)), beta > 0 to the left; gz scan angle = beta",
+    "camera_optical": "x image right, y image down, z optical axis",
+    "quaternion_order": "qx, qy, qz, qw"
+  },
+  "camera": {
+    "model": "Sony ILX-LR1 + SEL35F28Z (virtual pinhole)",
+    "topic": "/vtol/camera/image",
+    "info_topic": "/vtol/camera/camera_info",
+    "trigger_topic": "/vtol/camera/trigger",
+    "triggered": true,
+    "width": 4752,
+    "height": 3168,
+    "fx": 4658.823529411765,
+    "fy": 4658.823529411765,
+    "cx": 2375.5,
+    "cy": 1583.5,
+    "hfov_deg": 54.04316318235408,
+    "vfov_deg": 37.55606644489108,
+    "distortion": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "update_rate_hz": 5,
+    "trigger_spacing_m": 60.0,
+    "clip_far_m": 4000.0,
+    "t_BC": [
+      0.0,
+      0.0,
+      -0.18
+    ],
+    "R_BC": [
+      [
+        0,
+        -1,
+        0
+      ],
+      [
+        -1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        -1
+      ]
+    ],
+    "gz_pose_rpy": [
+      0,
+      1.5707963267948966,
+      0
+    ]
+  },
+  "lidar": {
+    "model": "RIEGL VUX-240^24-like line scanner (ideal geometric rays)",
+    "topic": "/vtol/lidar/scan",
+    "scan_min_deg": -20.0,
+    "scan_max_deg": 20.0,
+    "rays_per_line": 1333,
+    "lines_per_s": 200.0,
+    "angle_step_deg": 0.03003003003003003,
+    "range_min_m": 5.0,
+    "range_max_m": 1200.0,
+    "prr_hz_reference": 300000,
+    "beam_divergence_mrad": 0.35,
+    "noise": 0,
+    "pulse_spacing_s": 1.6666666666666667e-06,
+    "note": "gz renders a whole line at one instant; per-ray times t0 + k/600000 are assigned by the node",
+    "t_BL": [
+      0.0,
+      0.0,
+      -0.42
+    ],
+    "R_BL": [
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        1
+      ]
+    ],
+    "gz_pose_rpy": [
+      0,
+      1.5707963267948966,
+      0
+    ],
+    "half_angle_rad": 0.3490658503988659
+  },
+  "rig_height_m": 500,
+  "image_preset": "half"
+}
