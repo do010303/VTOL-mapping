@@ -3,10 +3,15 @@
 10 Hz) written to a video, with sim time, altitude, ground speed and a scale bar. One video frame per preview
 frame, so the video runs at sim speed (10 fps = real time).
 
-The LiDAR's scan line is drawn where it falls in the image (the ray lean puts it ~1 px behind the centre row),
-with its swath as a band: the part of the view the LiDAR covers at this moment.
+Layout (left to right):
+  camera image    the LiDAR returns of the last second projected into it, coloured by height above the terrain
+                  (0-30 m, bar in the LiDAR panel); below it the cross-section of the newest scan line
+  LiDAR panel     the scanner's settings; live: lines/s, returns, ranges, height above terrain, swath, line spacing,
+                  point density, ground hits, canopy height; totals; a top view of everything scanned so far
+                  (5 m cells, canopy height) with the vehicle and the camera footprint
+  perf panel      rates, latency, CPU / GPU / RAM per process (perf_monitor.py)
 
-  scripts/camera_view.py --world forest --model standard_vtol_mapping_0 --out out/<run>/camera_view.mp4
+  scripts/camera_view.py --world forest --model cw30e_mapping_0 --out out/<run>/camera_view.mp4
   (run_sitl.sh and static_run.sh start it with the other nodes; VIEW=0 to leave it out)
 
   scripts/camera_window.sh       # live, in a window of its own (q or Esc closes it), next to a running sim
@@ -37,6 +42,9 @@ from perf_monitor import PerfMonitor
 
 PROFILE_H = 190          # px, the cross-section panel under the image
 LIDAR_KEEP_S = 1.0       # s of LiDAR lines drawn on the image
+PANEL_W = 300            # px, the LiDAR panel
+MAP_CELL = 5.0           # m, cells of the top view
+MAP_HALF = 1200.0        # m, the top view covers +-MAP_HALF around the forest centre
 
 
 def main():
@@ -45,22 +53,33 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", help="video file (.mp4)")
     ap.add_argument("--window", action="store_true", help="show it live in a window (q / Esc closes)")
-    ap.add_argument("--scale", type=float, default=1.5, help="window size relative to the 792 x 528 preview")
+    ap.add_argument("--scale", type=float, default=1.25, help="window size relative to the 792 x 528 preview")
     ap.add_argument("--config", help="sensors.json (default config/sensors.json)")
     ap.add_argument("--topic", default="/vtol/camera/preview")
     ap.add_argument("--min-alt", type=float, default=-1e9, help="only record above this altitude, m")
     ap.add_argument("--duration", type=float, default=0, help="stop after this much sim time, s")
     ap.add_argument("--no-lidar", action="store_true", help="without the LiDAR points and the cross-section panel")
     ap.add_argument("--no-perf", action="store_true", help="without the performance panel (rates, latency, CPU/GPU)")
+    ap.add_argument("--no-panel", action="store_true", help="without the LiDAR panel")
     ap.add_argument("--perf-log", help="CSV of the performance checks, once a second (default: next to the video, "
                                        "or run/perf_<time>.csv for the window)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     c, l = cfg["camera"], cfg["lidar"]
+    # Terrain of the scene (for heights above ground on the sloping forest): the generated scene's exact DTM.
+    try:
+        from scene import Truth, scene_of_world
+        _truth = Truth(scene_of_world(args.world))
+        dtm_at = _truth.dtm_at
+    except Exception:                                    # no scene files: flat ground
+        dtm_at = lambda x, y: np.zeros(np.shape(x))  # noqa: E731
+    n_map = int(2 * MAP_HALF / MAP_CELL)
+    acc = {"lines": 0, "returns": 0, "rays": 0, "chm": np.full((n_map, n_map), np.nan, np.float32),
+           "line_stats": None, "rate": []}
     node = Node()
     poses = PoseFeed(node, args.world, args.model)
-    lock = threading.Lock()
+    lock = threading.RLock()           # re-entrant: the LiDAR panel is drawn while on_image holds it
     state = {"writer": None, "frames": 0, "t0": None, "last": None, "prev": None}
     if not args.out and not args.window:
         sys.exit("--out and/or --window")
@@ -94,19 +113,130 @@ def main():
         if cur is None:
             return
         p, q = cur
-        r = np.asarray(msg.ranges, dtype=np.float64)[::3]
-        ok = np.isfinite(r) & (r >= l["range_min_m"]) & (r <= l["range_max_m"])
+        r_all = np.asarray(msg.ranges, dtype=np.float64)
+        ok_all = np.isfinite(r_all) & (r_all >= l["range_min_m"]) & (r_all <= l["range_max_m"])
+        r = r_all[::3]
+        ok = ok_all[::3]
         rot = quat_to_matrix(*q)
         pts_b = t_bl + r[ok, None] * d_l[ok]
         pts_w = pts_b @ rot.T + p
+        hag = pts_w[:, 2] - dtm_at(pts_w[:, 0], pts_w[:, 1])           # height above the terrain
+        o_w = p + rot @ t_bl
+        agl = float(o_w[2] - dtm_at(np.array([o_w[0]]), np.array([o_w[1]]))[0])
+        rr = r_all[ok_all]
+        st = {"t": t, "rays": int(r_all.size), "returns": int(ok_all.sum()), "agl": agl,
+              "range": (float(rr.min()), float(np.median(rr)), float(rr.max())) if rr.size else None,
+              "swath": float(np.ptp(pts_b[:, 1])) if len(pts_b) > 1 else 0.0,
+              "ground": float(np.mean(hag < 0.5)) if len(hag) else 0.0,
+              "canopy_p95": float(np.percentile(hag, 95)) if len(hag) else 0.0, "p": p.copy()}
+        # Top view: highest return above the terrain per 5 m cell.
+        ij = np.floor((pts_w[:, :2] + MAP_HALF) / MAP_CELL).astype(int)
+        inm = (ij >= 0).all(axis=1) & (ij < n_map).all(axis=1)
         with lock:
-            lines.append((t, pts_w, pts_b[:, 1], pts_w[:, 2]))
+            lines.append((t, pts_w, pts_b[:, 1], hag))
             while lines and lines[0][0] < t - LIDAR_KEEP_S:
                 lines.pop(0)
+            acc["lines"] += 1
+            acc["rays"] += st["rays"]
+            acc["returns"] += st["returns"]
+            acc["line_stats"] = st
+            acc["rate"].append((t, st["returns"], st["rays"]))
+            while acc["rate"] and acc["rate"][0][0] < t - 1.0:
+                acc["rate"].pop(0)
+            chm = acc["chm"]
+            np.fmax.at(chm, (ij[inm, 1], ij[inm, 0]), hag[inm].astype(np.float32))
 
     def colour(z):
         return cv2.applyColorMap(np.clip(z / 30 * 255, 0, 255).astype(np.uint8).reshape(-1, 1),
                                  cv2.COLORMAP_VIRIDIS)[:, 0]
+
+    def lidar_panel(height, p, rot, v):
+        """The LiDAR panel: settings, live numbers, totals, colour bar, top view of the map so far."""
+        pan = np.full((height, PANEL_W, 3), 22, np.uint8)
+        y = [18]
+
+        def put(txt, col=(225, 225, 225), size=0.42, dy=17, x=8):
+            cv2.putText(pan, txt, (x, y[0]), cv2.FONT_HERSHEY_SIMPLEX, size, col, 1, cv2.LINE_AA)
+            y[0] += dy
+
+        with lock:
+            st = acc["line_stats"]
+            rate = list(acc["rate"])
+            n_lines, n_ret, n_rays = acc["lines"], acc["returns"], acc["rays"]
+            chm = acc["chm"].copy()
+        put("LiDAR  (RIEGL VUX-240-like, nadir)", (255, 255, 255), 0.46, 19)
+        put(f"+-{l['scan_max_deg']:g} deg, {l['rays_per_line']} rays/line, {l['lines_per_s']:g} lines/s", (170, 170, 170))
+        put(f"{l.get('prr_hz_reference', 0) / 1e3:.0f} kHz mode, range {l['range_min_m']:g}-{l['range_max_m']:g} m",
+            (170, 170, 170), dy=21)
+        if st is None:
+            put("waiting for scan lines ...", (200, 200, 120))
+        else:
+            span = rate[-1][0] - rate[0][0] if len(rate) > 1 else 0
+            lps = (len(rate) - 1) / span if span > 0 else 0
+            ret_s = sum(x[1] for x in rate[1:]) / span if span > 0 else 0
+            ratio = sum(x[1] for x in rate) / max(sum(x[2] for x in rate), 1)
+            good = (0, 220, 0) if abs(lps - l["lines_per_s"]) < 2 else (0, 200, 255)
+            put(f"lines        {lps:6.1f} /s (sim)", good)
+            put(f"returns      {100 * ratio:6.1f} % of rays")
+            put(f"points       {ret_s / 1e3:6.1f} k/s")
+            if st["range"]:
+                put(f"range        {st['range'][0]:5.0f} / {st['range'][1]:4.0f} / {st['range'][2]:4.0f} m")
+                put("             min / median / max", (140, 140, 140), 0.36, 15)
+            put(f"LiDAR AGL    {st['agl']:6.1f} m")
+            put(f"swath        {st['swath']:6.1f} m")
+            sp = v / l["lines_per_s"] if v > 0 else float("nan")
+            put(f"line spacing {100 * sp:6.1f} cm (along)")
+            dens = ret_s / (v * st["swath"]) if v > 1 and st["swath"] > 1 else float("nan")
+            put(f"density      {dens:6.1f} pts/m2 (1 strip)")
+            put(f"ground hits  {100 * st['ground']:6.1f} % of returns")
+            put(f"canopy p95   {st['canopy_p95']:6.1f} m above terrain", dy=21)
+        area = np.isfinite(chm).sum() * MAP_CELL ** 2 / 1e6
+        put(f"total {n_lines:,} lines, {n_ret / 1e6:.1f} M points ({100 * n_ret / max(n_rays, 1):.0f} %)",
+            (255, 255, 255))
+        put(f"      covered {area:.2f} km2 (5 m cells)", (255, 255, 255), dy=12)
+        # Colour bar 0-30 m.
+        bar = cv2.applyColorMap(np.linspace(0, 255, PANEL_W - 60).astype(np.uint8).reshape(1, -1),
+                                cv2.COLORMAP_VIRIDIS)
+        y0 = y[0]
+        pan[y0:y0 + 10, 30:PANEL_W - 30] = np.repeat(bar, 10, axis=0)
+        for zl in (0, 10, 20, 30):
+            xl = int(30 + zl / 30 * (PANEL_W - 61))
+            cv2.putText(pan, f"{zl}", (xl - 5, y0 + 23), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(pan, "colour: m above terrain", (30, y0 + 37), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1,
+                    cv2.LINE_AA)
+        y[0] = y0 + 46
+        # Top view of everything scanned so far.
+        side = min(PANEL_W - 16, height - y[0] - 22)
+        if side > 60:
+            img_m = np.full(chm.shape + (3,), 45, np.uint8)
+            fin = np.isfinite(chm)
+            img_m[fin] = colour(chm[fin])
+            img_m = cv2.resize(img_m[::-1], (side, side), interpolation=cv2.INTER_AREA)      # north up
+            def to_px(xw, yw):
+                return (int((xw + MAP_HALF) / (2 * MAP_HALF) * side), int((MAP_HALF - yw) / (2 * MAP_HALF) * side))
+            # Camera footprint on the terrain, and the vehicle with its heading.
+            r_wc = rot @ np.array(c["R_BC"], dtype=float)
+            o = p + rot @ np.array(c["t_BC"], dtype=float)
+            g = float(dtm_at(np.array([p[0]]), np.array([p[1]]))[0])
+            corners = []
+            for uu, vv in ((0, 0), (c["width"], 0), (c["width"], c["height"]), (0, c["height"])):
+                dd = r_wc @ np.array([(uu - c["cx"]) / c["fx"], (vv - c["cy"]) / c["fy"], 1.0])
+                if dd[2] < -1e-6:
+                    q_ = o + (g - o[2]) / dd[2] * dd
+                    corners.append(to_px(q_[0], q_[1]))
+            if len(corners) == 4:
+                cv2.polylines(img_m, [np.array(corners, np.int32)], True, (255, 255, 255), 1, cv2.LINE_AA)
+            vx, vy = to_px(p[0], p[1])
+            nose = rot @ np.array([1.0, 0, 0])
+            tip = to_px(p[0] + 60 * nose[0], p[1] + 60 * nose[1])
+            cv2.circle(img_m, (vx, vy), 3, (60, 60, 255), -1)
+            cv2.line(img_m, (vx, vy), tip, (60, 60, 255), 2, cv2.LINE_AA)
+            x0 = (PANEL_W - side) // 2
+            pan[y[0]:y[0] + side, x0:x0 + side] = img_m
+            cv2.rectangle(pan, (x0 - 1, y[0] - 1), (x0 + side, y[0] + side), (120, 120, 120), 1)
+            cv2.putText(pan, f"map so far: canopy height, {2 * MAP_HALF / 1000:.1f} km, north up", (x0, y[0] + side + 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
+        return pan
 
     def on_image(msg):
         t_proc = time.monotonic()
@@ -121,7 +251,7 @@ def main():
         h, w = img.shape[:2]
         scale = w / c["width"]
         fx = c["fx"] * scale
-        cam_h = p[2] + c["t_BC"][2]                         # above the ground (flat terrain)
+        cam_h = p[2] + c["t_BC"][2] - float(dtm_at(np.array([p[0]]), np.array([p[1]]))[0])   # above the terrain
         # LiDAR swath in the image: the scan line is across the image (body y), at the centre row.
         half = math.tan(math.radians(l["scan_max_deg"]))
         u0, u1 = int(w / 2 - fx * half), int(w / 2 + fx * half)
@@ -138,11 +268,12 @@ def main():
             if recent:
                 # The last second of returns, projected into this image, coloured by height (viridis: 0-30 m).
                 pw = np.concatenate([ln[1] for ln in recent])
+                ph = np.concatenate([ln[3] for ln in recent])
                 pc = ((pw - p) @ rot - np.array(c["t_BC"])) @ np.array(c["R_BC"])
                 vis = pc[:, 2] > 1
                 uu = (fx * pc[vis, 0] / pc[vis, 2] + c["cx"] * scale).astype(int)
                 vv = (fx * pc[vis, 1] / pc[vis, 2] + c["cy"] * scale).astype(int)
-                col = colour(pw[vis, 2])
+                col = colour(ph[vis])
                 ins = (uu >= 1) & (uu < w - 1) & (vv >= 1) & (vv < h - 1)
                 for du in (0, 1):
                     for dv in (0, 1):
@@ -158,6 +289,8 @@ def main():
                     yl = int(PROFILE_H - 22 - (zl - z_lo) / (z_hi - z_lo) * (PROFILE_H - 40))
                     cv2.line(profile, (34, yl), (w - 6, yl), (70, 70, 70) if zl else (110, 110, 110), 1)
                     cv2.putText(profile, txt, (4, yl + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1, cv2.LINE_AA)
+                cv2.putText(profile, "height above terrain", (40, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (170, 170, 170), 1,
+                            cv2.LINE_AA)
                 cp = colour(zz)
                 ok = (px_x >= 0) & (px_x < w) & (px_y >= 0) & (px_y < PROFILE_H)
                 for du in (0, 1):
@@ -187,10 +320,12 @@ def main():
             cv2.putText(img, f"up = {hdg:03.0f} deg", (w - 120, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
                         cv2.LINE_AA)
             if not args.no_lidar:
-                cv2.putText(img, "LiDAR points: last 1 s, colour = height 0-30 m", (8, 44),
+                cv2.putText(img, "LiDAR points: last 1 s, colour = height above terrain 0-30 m", (8, 44),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
                 img = np.vstack([img, profile if profile is not None else np.full((PROFILE_H, w, 3), 30, np.uint8)])
                 h = img.shape[0]
+            if not args.no_lidar and not args.no_panel:
+                img = np.hstack([img, lidar_panel(img.shape[0], p, rot, v)])
             if perf:
                 perf.preview(t, newest_pose_t(), time.monotonic() - t_proc)
                 img = np.hstack([img, perf.panel(img.shape[0])])
@@ -221,7 +356,8 @@ def main():
     if args.window:
         name = "Camera view (nadir) - VTOL-mapping"
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(name, int((792 + (0 if args.no_perf else 360)) * args.scale * 0.85),
+        cv2.resizeWindow(name, int((792 + (0 if args.no_perf else 360) + (0 if args.no_lidar or args.no_panel else PANEL_W))
+                                   * args.scale * 0.85),
                          int((528 + (0 if args.no_lidar else PROFILE_H)) * args.scale * 0.85))
         blank = np.zeros((528, 792, 3), np.uint8)
         cv2.putText(blank, "waiting for /vtol/camera/preview ...", (180, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7,

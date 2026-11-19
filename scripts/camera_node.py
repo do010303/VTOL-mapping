@@ -2,7 +2,7 @@
 """Camera node: saves every image of the nadir camera with its sim time and pose.
 
 Writes to <out>/camera/:
-  img_<id>.png      RGB image
+  img_<id>.png      RGB image (or .jpg with --format jpg: JPEG quality 95, spec 8 allows PNG or JPEG)
   images.csv        image_id, t_s, file, width, height, x_m, y_m, z_m, qx, qy, qz, qw (vehicle pose at t_s),
                     trigger_t_s (when the trigger for it was sent, flight only)
   camera_info.json  K, size, distortion as Gazebo publishes them
@@ -34,12 +34,13 @@ from gz.transport13 import Node
 
 
 class CameraRecorder:
-    def __init__(self, cfg, out, poses, png_level=1):
+    def __init__(self, cfg, out, poses, png_level=1, fmt="png"):
         self.cfg = cfg["camera"]
         self.dir = os.path.join(out, "camera")
         os.makedirs(self.dir, exist_ok=True)
         self.poses = poses
         self.png_level = png_level
+        self.fmt = fmt
         self.lock = threading.Lock()
         self.n = 0
         self.first_t = self.last_t = None
@@ -92,8 +93,9 @@ class CameraRecorder:
                 time.sleep(0.05)
                 pose = self.poses.at(t)
             img = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3)
-            name = f"img_{image_id:05d}.png"
-            cv2.imwrite(os.path.join(self.dir, name), img[:, :, ::-1], [cv2.IMWRITE_PNG_COMPRESSION, self.png_level])
+            name = f"img_{image_id:05d}.{self.fmt}"
+            opts = [cv2.IMWRITE_JPEG_QUALITY, 95] if self.fmt == "jpg" else [cv2.IMWRITE_PNG_COMPRESSION, self.png_level]
+            cv2.imwrite(os.path.join(self.dir, name), img[:, :, ::-1], opts)
             p, q = pose if pose is not None else ((np.nan,) * 3, (np.nan,) * 4)
             self.csv.write(f"{image_id},{t:.4f},{name},{w},{h},{p[0]:.4f},{p[1]:.4f},{p[2]:.4f},"
                            f"{q[0]:.6f},{q[1]:.6f},{q[2]:.6f},{q[3]:.6f},{'' if trig is None else f'{trig:.4f}'}\n")
@@ -130,12 +132,13 @@ def main():
     ap.add_argument("--min-alt", type=float, default=300, help="only trigger above this altitude, m")
     ap.add_argument("--trigger-box", type=float, nargs=4, metavar=("XMIN", "XMAX", "YMIN", "YMAX"),
                     help="only trigger while the vehicle is inside this area (world x, y), m")
+    ap.add_argument("--format", choices=("png", "jpg"), default="png", help="image files (jpg: quality 95)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     node = Node()
     poses = PoseFeed(node, args.world, args.model)
-    rec = CameraRecorder(cfg, args.out, poses)
+    rec = CameraRecorder(cfg, args.out, poses, fmt=args.format)
     c = cfg["camera"]
     if not node.subscribe(Image, c["topic"], rec.on_image):
         sys.exit(f"failed to subscribe to {c['topic']}")

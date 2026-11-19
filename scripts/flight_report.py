@@ -4,7 +4,7 @@
   * Every LiDAR line is georeferenced with the vehicle pose interpolated to the line's time
     (p_W = T_WB(t) x T_BL x p_L, spec 5). Gazebo renders a whole line at one instant, so all rays of a
     line share that time (the 1/600000 s pulse spacing of the spec is not applied here).
-  * On the survey line (inside the forest, wings level): ground returns against z = 0, all returns against
+  * On the survey line (inside the forest, wings level): ground returns against the DTM, all returns against
     the DSM, DSM from the cloud against the DSM of the scene, density, swath, speed, attitude, cross-track.
   * Images: spacing, forward overlap, and tree tops projected into one image (overlay_flight.jpg).
 Writes <run>/flight_report.json, flight_report.md, cloud_line.npz (x, y, z, t of the on-line returns), figures.
@@ -20,7 +20,8 @@ import os
 import cv2
 import numpy as np
 
-from static_report import Truth, lidar_angles, lidar_dirs, load_scans, project, quat_to_matrix
+from scene import Truth, scene_of_run
+from static_report import image_file, lidar_dirs, load_scans, project, quat_to_matrix
 from strips import segment, strip_of_time
 
 
@@ -42,6 +43,44 @@ def interp_poses(traj, t):
     return p, r
 
 
+def lidar_source(run, choice="auto"):
+    """(sub-directory, exact): lidar_exact/ (scripts/lidar_exact.py: per-ray emission times, ray casting on the
+    scene mesh) when it exists or is asked for, else lidar/ (the Gazebo gpu_lidar recording)."""
+    if choice == "exact" or (choice == "auto" and os.path.isdir(os.path.join(run, "lidar_exact"))):
+        return "lidar_exact", True
+    return "lidar", False
+
+
+def world_points(cfg, t, r, traj, exact, calibrated=True, p=None, rot=None, chunk=None):
+    """Yields (sl, xyz, t_ray, hit) per chunk of scan lines: the returns in world coordinates,
+    p_W = T_WB(t) T_BL p_L (spec 5). Gazebo recording: every ray of a line at the line's time t_s and the line's
+    pose (p, rot), with the calibrated directions. Exact recording: ray k at t_s + k * pulse_spacing_s with the
+    pose interpolated at that time, nominal directions (the ray caster used exactly those)."""
+    lc = cfg["lidar"]
+    d_l, _ = lidar_dirs(cfg, calibrated=calibrated and not exact)
+    d_b = d_l @ np.array(lc["R_BL"]).T
+    t_bl = np.array(lc["t_BL"])
+    n = r.shape[1]
+    dt = lc["pulse_spacing_s"] * np.arange(n) if exact else np.zeros(n)
+    chunk = chunk or (300 if exact else 2000)
+    for a in range(0, len(t), chunk):
+        sl = slice(a, a + chunk)
+        rr = r[sl]
+        hit = np.isfinite(rr)
+        tk = t[sl, None] + dt[None, :]
+        if exact:
+            pk, rk = interp_poses(traj, tk.ravel())
+            o = pk + rk @ t_bl
+            d = np.einsum("mij,mj->mi", rk, np.tile(d_b, (len(rr), 1)))
+            pts = (o + np.where(hit, rr, 0.0).reshape(-1, 1) * d).reshape(len(rr), n, 3)
+        else:
+            pp, ro = (p[sl], rot[sl]) if p is not None else interp_poses(traj, t[sl])
+            o = pp + np.einsum("nij,j->ni", ro, t_bl)
+            d_w = np.einsum("nij,kj->nki", ro, d_b)
+            pts = o[:, None, :] + np.where(hit, rr, 0.0)[..., None] * d_w
+        yield sl, pts[hit], tk[hit], hit
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run")
@@ -50,15 +89,20 @@ def main():
     ap.add_argument("--eval", type=float, nargs=4, default=(-400, 400, -400, 400), metavar=("XMIN", "XMAX", "YMIN", "YMAX"),
                     help="evaluation area for coverage and DSM (spec 6/7: central 800 x 800 m)")
     ap.add_argument("--no-calibration", action="store_true", help="nominal scan angles instead of lidar_angles.json")
+    ap.add_argument("--lidar", choices=("auto", "gz", "exact"), default="auto",
+                    help="auto: lidar_exact/ if it exists (scripts/lidar_exact.py), else the Gazebo recording")
     args = ap.parse_args()
     run = args.run
     cfg = json.load(open(os.path.join(run, "sensors.json")))
-    lc, cc = cfg["lidar"], cfg["camera"]
-    truth = Truth()
+    cc = cfg["camera"]
+    truth = Truth(scene_of_run(run))
     traj = np.loadtxt(os.path.join(run, "trajectory.csv"), delimiter=",", skiprows=1)
     traj = traj[np.concatenate([[True], np.diff(traj[:, 0]) > 0])]
-    t, r = load_scans(run)
-    out = {"lines_total": int(len(t)), "pose_rate_hz": float(1 / np.median(np.diff(traj[:, 0])))}
+    lidar_sub, exact = lidar_source(run, args.lidar)
+    sfx = "_exact" if exact else ""           # the Gazebo-recording report keeps its plain names
+    t, r = load_scans(run, lidar_sub)
+    out = {"scene": truth.scene, "lidar_source": lidar_sub, "lines_total": int(len(t)),
+           "pose_rate_hz": float(1 / np.median(np.diff(traj[:, 0])))}
 
     p, rot = interp_poses(traj, t)
     sid, strips = segment(t, p, rot, args.y_range, planned_x=args.planned_x)
@@ -89,33 +133,35 @@ def main():
         "roll_deg": {"max_abs": float(np.abs(np.degrees(np.arcsin(rot[:, 2, 1]))).max())},
         "pitch_deg": {"mean": float(np.degrees(-np.arcsin(rot[:, 2, 0])).mean())},
     }
-    beta = lidar_angles(cfg, calibrated=not args.no_calibration)
-    out["calibrated_angles"] = bool(not args.no_calibration and len(beta) and
+    out["calibrated_angles"] = bool(not exact and not args.no_calibration and
                                     os.path.exists(os.path.join(os.path.dirname(__file__), "..", "config", "lidar_angles.json")))
-    d_l, beta = lidar_dirs(cfg, calibrated=not args.no_calibration)
-    d_b = d_l @ np.array(lc["R_BL"]).T
-    o_w = p + np.einsum("nij,j->ni", rot, np.array(lc["t_BL"]))
-    hit = np.isfinite(r)
-    xyz = np.empty((int(hit.sum()), 3), dtype=np.float32)       # 10 strips: ~130 M points
+    hit_n = int(np.isfinite(r).sum())
+    xyz = np.empty((hit_n, 3), dtype=np.float32)                   # 10 strips: ~130 M points
+    tt = np.empty(hit_n)
     k0 = 0
-    for a in range(0, len(t), 2000):                               # in chunks: lines x rays x 3 is large
-        sl = slice(a, a + 2000)
-        d_w = np.einsum("nij,kj->nki", rot[sl], d_b)
-        pts = o_w[sl, None, :] + np.where(hit[sl], r[sl], 0.0)[..., None] * d_w
-        m = hit[sl]
-        xyz[k0:k0 + m.sum()] = pts[m]
-        k0 += int(m.sum())
-    tt = np.repeat(t[:, None], r.shape[1], axis=1)[hit]
+    for sl, pts, tk, hit in world_points(cfg, t, r, traj, exact, not args.no_calibration, p, rot):
+        xyz[k0:k0 + len(pts)] = pts
+        tt[k0:k0 + len(pts)] = tk
+        k0 += len(pts)
+    hit = np.isfinite(r)
     out["returns"] = {"rays": int(hit.size), "returns": int(hit.sum()), "ratio": float(hit.mean()),
                       "per_s": float(hit.sum() / dur)}
 
     inside = (np.abs(xyz[:, 0]) < truth.x[-1]) & (np.abs(xyz[:, 1]) < truth.y[-1])
     xyz, tt = xyz[inside], tt[inside]
     z = xyz[:, 2]
-    dsm = truth.dsm_at(xyz[:, 0], xyz[:, 1])
-    ground = z < 0.5
-    out["ground"] = {"ratio": float(ground.mean()), "z_mean_m": float(z[ground].mean()), "z_std_m": float(z[ground].std()),
-                     "z_abs_p99_m": float(np.percentile(np.abs(z[ground]), 99)), "z_abs_max_m": float(np.abs(z[ground]).max())}
+    # Per point, in blocks (10 strips: ~120 M points; whole-array float64 temporaries need > 10 GB).
+    dsm = np.empty(len(z), np.float32)
+    zr = np.empty(len(z), np.float32)                                 # height above the terrain
+    for a in range(0, len(z), 5_000_000):
+        b = slice(a, a + 5_000_000)
+        dsm[b] = truth.dsm_at(xyz[b, 0], xyz[b, 1])
+        zr[b] = z[b] - truth.dtm_at(xyz[b, 0], xyz[b, 1])
+    ground = zr < 0.5
+    out["ground"] = {"ratio": float(ground.mean()), "z_minus_dtm_mean_m": float(zr[ground].mean()),
+                     "z_minus_dtm_std_m": float(zr[ground].std()),
+                     "z_minus_dtm_abs_p99_m": float(np.percentile(np.abs(zr[ground]), 99)),
+                     "z_minus_dtm_abs_max_m": float(np.abs(zr[ground]).max())}
     res = z - dsm
     out["returns_vs_dsm"] = {"above_dsm_by_0.5m": float(np.mean(res > 0.5)), "above_dsm_by_1m": float(np.mean(res > 1.0)),
                              "veg_median_m": float(np.median(res[~ground]))}
@@ -125,20 +171,22 @@ def main():
     out["returns_vs_surface"] = {"above_by_5cm": float(np.mean(ex > 0.05)), "above_by_20cm": float(np.mean(ex > 0.20)),
                                  "max_above_m": float(ex.max()), "top_surface_ratio": float(top.mean()),
                                  "top_surface_mean_m": float(ex[top].mean()), "top_surface_std_m": float(ex[top].std())}
-    s1 = strip_of_time(strips, tt)
-    first = s1 == strips[0]["id"]
+    first = (tt >= strips[0]["t0"]) & (tt <= strips[0]["t1"])
     out["swath_m"] = float(np.percentile(xyz[first, 0], 99.9) - np.percentile(xyz[first, 0], 0.1))
 
     # DSM / DTM from the cloud on the truth's 1 m grid.
     cell = truth.cell
-    j = np.round((xyz[:, 0] - truth.x[0]) / cell).astype(int)
-    i = np.round((xyz[:, 1] - truth.y[0]) / cell).astype(int)
     n = len(truth.x)
-    flat = i * n + j
+    flat = np.empty(len(z), np.int32)               # cell index i * n + j (int32: 10 strips ~ 120 M points)
+    for a in range(0, len(z), 5_000_000):
+        b = slice(a, a + 5_000_000)
+        jj = np.round((xyz[b, 0] - truth.x[0]) / cell).astype(np.int32)
+        ii = np.round((xyz[b, 1] - truth.y[0]) / cell).astype(np.int32)
+        flat[b] = ii * n + jj
     dsm_c = np.full(n * n, -np.inf)
     np.maximum.at(dsm_c, flat, z)
-    dtm_c = np.full(n * n, np.inf)
-    np.minimum.at(dtm_c, flat, z)
+    dtm_c = np.full(n * n, np.inf)                 # lowest return above the terrain, per cell
+    np.minimum.at(dtm_c, flat, zr)
     cnt = np.bincount(flat, minlength=n * n)
     seen = cnt > 0
     ex0, ex1, ey0, ey1 = args.eval
@@ -168,7 +216,7 @@ def main():
     b5 = box.reshape(n, n)[:n // k * k, :n // k * k].reshape(n // k, k, n // k, k).all(axis=(1, 3))
     out["dtm_5m_cells_with_ground"] = float(g5[b5].mean())
     if len(xyz) <= 30_000_000:                     # bigger runs: use export_dataset.py (LAS per strip)
-        np.savez_compressed(os.path.join(run, "cloud_line.npz"), xyz=xyz.astype(np.float32), t=tt)
+        np.savez_compressed(os.path.join(run, f"cloud_line{sfx}.npz"), xyz=xyz.astype(np.float32), t=tt)
 
     # Images.
     im = np.genfromtxt(os.path.join(run, "camera", "images.csv"), delimiter=",", names=True, dtype=None, encoding=None)
@@ -176,7 +224,8 @@ def main():
     on_i = si > 0
     sp = np.concatenate([np.hypot(np.diff(im["x_m"][si == st["id"]]), np.diff(im["y_m"][si == st["id"]]))
                          for st in strips if (si == st["id"]).sum() > 1])
-    h_canopy = im["z_m"][on_i].mean() - 30
+    agl = im["z_m"][on_i] - truth.dtm_at(im["x_m"][on_i], im["y_m"][on_i])
+    h_canopy = agl.mean() - 30
     along = 2 * h_canopy * math.tan(math.radians(cc["vfov_deg"] / 2))
     lat = im["t_s"] - im["trigger_t_s"]
     across = 2 * h_canopy * math.tan(math.radians(cc["hfov_deg"] / 2))
@@ -185,13 +234,14 @@ def main():
                      "spacing_m": {"mean": float(sp.mean()), "min": float(sp.min()), "max": float(sp.max())},
                      "forward_overlap_at_30m_canopy": float(1 - sp.mean() / along),
                      "trigger_to_image_s": {"mean": float(np.nanmean(lat)), "max": float(np.nanmax(lat))},
-                     "gsd_ground_cm": float(im["z_m"][on_i].mean() * 35.7 / 35.0 / cc["width"] * 100)}
+                     "gsd_ground_cm": float(agl.mean() * 35.7 / 35.0 / cc["width"] * 100),
+                     "agl_m": {"mean": float(agl.mean()), "min": float(agl.min()), "max": float(agl.max())}}
     k0 = np.nonzero(si == strips[0]["id"])[0]
     k = k0[len(k0) // 2]
-    img = cv2.imread(os.path.join(run, "camera", "img_%05d.png" % im["image_id"][k]))
+    img = cv2.imread(os.path.join(run, "camera", image_file(im, k)))
     p_wb = np.array([im["x_m"][k], im["y_m"][k], im["z_m"][k]])
     r_wb = quat_to_matrix(im["qx"][k], im["qy"][k], im["qz"][k], im["qw"][k])
-    tw = np.stack([truth.trees["x_m"], truth.trees["y_m"], truth.trees["height_m"]], axis=1)
+    tw = np.stack([truth.trees["x_m"], truth.trees["y_m"], truth.trees["height_m"] + truth.tree_z0], axis=1)
     u, v, zc = project(cfg, tw, p_wb, r_wb)
     ok = (zc > 0) & (u >= 0) & (u < cc["width"]) & (v >= 0) & (v < cc["height"])
     for a, b in zip(u[ok], v[ok]):
@@ -199,15 +249,15 @@ def main():
     # The LiDAR returns of the 0.25 s around the exposure, by height.
     near = np.abs(tt - im["t_s"][k]) < 0.125
     u, v, zc = project(cfg, xyz[near].astype(np.float64), p_wb, r_wb)
-    col = cv2.applyColorMap(np.clip(xyz[near][:, 2] / 30 * 255, 0, 255).astype(np.uint8).reshape(-1, 1), cv2.COLORMAP_VIRIDIS)
+    col = cv2.applyColorMap(np.clip(zr[near] / 30 * 255, 0, 255).astype(np.uint8).reshape(-1, 1), cv2.COLORMAP_VIRIDIS)
     for a, b, c in zip(u[::3], v[::3], col[::3, 0]):
         if 0 <= a < cc["width"] and 0 <= b < cc["height"]:
             cv2.circle(img, (int(a), int(b)), 2, tuple(int(x) for x in c), -1)
-    out["overlay_image"] = {"file": str("img_%05d.png" % im["image_id"][k]), "trees_in_image": int(ok.sum())}
+    out["overlay_image"] = {"file": image_file(im, k), "trees_in_image": int(ok.sum())}
     cy, cx = int(cc["cy"]), int(cc["cx"])
-    cv2.imwrite(os.path.join(run, "overlay_flight_centre.jpg"), img[cy - 350:cy + 350, cx - 600:cx + 600],
+    cv2.imwrite(os.path.join(run, f"overlay_flight_centre{sfx}.jpg"), img[cy - 350:cy + 350, cx - 600:cx + 600],
                 [cv2.IMWRITE_JPEG_QUALITY, 90])
-    cv2.imwrite(os.path.join(run, "overlay_flight.jpg"),
+    cv2.imwrite(os.path.join(run, f"overlay_flight{sfx}.jpg"),
                 cv2.resize(img, (cc["width"] // 3, cc["height"] // 3), interpolation=cv2.INTER_AREA))
 
     import matplotlib
@@ -228,11 +278,13 @@ def main():
     fig.colorbar(m, ax=ax[:2], shrink=0.6)
     ax[3].hist(e, bins=np.linspace(-5, 5, 101), color="#3b7dd8")
     ax[3].set_yscale("log"); ax[3].set_xlabel("DSM cloud − DSM scene, 1 m cells (m)"); ax[3].set_title("DSM error")
-    fig.savefig(os.path.join(run, "flight_dsm.png"), dpi=90, bbox_inches="tight")
+    fig.savefig(os.path.join(run, f"flight_dsm{sfx}.png"), dpi=90, bbox_inches="tight")
 
-    json.dump(out, open(os.path.join(run, "flight_report.json"), "w"), indent=2)
+    json.dump(out, open(os.path.join(run, f"flight_report{sfx}.json"), "w"), indent=2)
     L, G, D, I = out["line"], out["ground"], out["dsm_1m"], out["images"]
     md = f"""# Flight {os.path.basename(os.path.abspath(run))}
+
+Scene `{truth.scene}`; LiDAR from `{lidar_sub}/` ({'per-ray emission times, ray casting on the scene mesh' if exact else 'Gazebo gpu_lidar, one instant per line'}).
 
 | | |
 |---|---|
@@ -241,7 +293,7 @@ def main():
 | LiDAR lines | {L['lines']} ({L['lines'] / L['duration_s']:.1f}/s), {L['line_spacing_m'] * 100:.1f} cm apart along track |
 | Returns | {out['returns']['returns']:,} of {out['returns']['rays']:,} rays ({100 * out['returns']['ratio']:.2f} %), {out['returns']['per_s']:,.0f}/s |
 | Swath / density | {out['swath_m']:.1f} m; {out['density_pts_m2']:.1f} points/m² over the eval area {out['eval_area_m']}, {100 * out['coverage_1m']:.2f} % of its 1 m cells hit, 5 % of cells < {out['points_per_cell_p05']:.0f} points |
-| Ground returns | {100 * G['ratio']:.1f} % of returns; z = {G['z_mean_m'] * 100:+.1f} ± {G['z_std_m'] * 100:.1f} cm, p99 {G['z_abs_p99_m'] * 100:.1f} cm (truth: 0) |
+| Ground returns | {100 * G['ratio']:.1f} % of returns; z − DTM = {G['z_minus_dtm_mean_m'] * 100:+.1f} ± {G['z_minus_dtm_std_m'] * 100:.1f} cm, p99 {G['z_minus_dtm_abs_p99_m'] * 100:.1f} cm (truth: 0) |
 | Returns vs. exact scene surface | {100 * out['returns_vs_surface']['above_by_5cm']:.3f} % above it by > 5 cm, {100 * out['returns_vs_surface']['above_by_20cm']:.3f} % by > 20 cm (max {out['returns_vs_surface']['max_above_m']:.2f} m); on the top surface: {out['returns_vs_surface']['top_surface_mean_m'] * 100:+.1f} ± {out['returns_vs_surface']['top_surface_std_m'] * 100:.1f} cm |
 | Returns above the 1 m DSM (cell maximum) | {100 * out['returns_vs_dsm']['above_dsm_by_0.5m']:.2f} % by > 0.5 m, {100 * out['returns_vs_dsm']['above_dsm_by_1m']:.2f} % by > 1 m |
 | DSM 1 m | {100 * D['cells_with_data']:.1f} % of cells; bias {D['bias_m']:+.2f} m, RMSE {D['rmse_m']:.2f} m, median abs {D['median_abs_m']:.2f} m, {100 * D['within_1m']:.1f} % within 1 m |
@@ -255,7 +307,7 @@ def main():
                  f"{st['ground_speed_mps']:.2f} | {st['altitude_m'][0]:.1f}–{st['altitude_m'][1]:.1f} | "
                  f"{st['cross_track_m']['mean']:+.2f} / {st['cross_track_m']['max_abs']:.2f} | {st['roll_max_abs_deg']:.2f} |"
                  for st in strips) + "\n"
-    open(os.path.join(run, "flight_report.md"), "w").write(md)
+    open(os.path.join(run, f"flight_report{sfx}.md"), "w").write(md)
     print(md)
 
 

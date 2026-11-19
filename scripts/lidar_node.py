@@ -5,9 +5,10 @@ Writes to <out>/lidar/:
   scans_<k>.npz     t_s (line time), scan_id, ranges_m (n_lines x rays, float32; inf = no return)
   stats.json        lines received, rate in sim and wall time, gaps, return ratio, range statistics
 
-and <out>/trajectory.csv (the vehicle's pose stream, if --model is given). Per-ray times and
-directions follow from config/sensors.json: beta_k = scan_min + k * step,
-t_k = t_s + k * pulse_spacing (spec 2), d_L = (0, sin beta, -cos beta).
+and <out>/trajectory.csv (the vehicle's pose stream, if --model is given). Ray directions follow from
+config/sensors.json: beta_k = scan_min + k * step, d_L = (0, sin beta, -cos beta). Gazebo renders all rays of a
+line at the line's time t_s; the spec's per-ray schedule t_k = t_s + k * pulse_spacing (spec 2), each ray from
+the pose at its own time, is produced afterwards by scripts/lidar_exact.py from the recorded trajectory.
 
   scripts/lidar_node.py --world forest_static --model vtol_rig --out out/static_500 --duration 10
 """

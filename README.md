@@ -7,6 +7,8 @@ nguyên bản, mọi thứ nằm trong thư mục này.
 - Yêu cầu, thông số thiết bị: [Thong_so_mo_phong_VTOL_mapping_rung.md](Thong_so_mo_phong_VTOL_mapping_rung.md)
 - Kết quả kiểm tra khả thi: [docs/ket_qua_kha_thi.md](docs/ket_qua_kha_thi.md)
 - Giai đoạn 2 (GUI, camera view, bay đủ chu trình, 600 m / 10 tuyến, xuất dữ liệu): [docs/ke_hoach_chay.md](docs/ke_hoach_chay.md)
+- Giai đoạn 3 (khớp tài liệu: rừng 2 km phẳng + dốc, LiDAR 600 kHz với thời điểm từng tia, máy bay cỡ CW‑30E,
+  map 3D + RViz): [docs/ket_qua_giai_doan_3.md](docs/ket_qua_giai_doan_3.md)
 
 Repo này là thư mục `examples/VTOL-mapping` của PX4-Autopilot: clone nó vào đúng chỗ đó, vì các script dùng
 PX4 ở `../..` (bản build SITL, model `standard_vtol` và airframe 4004):
@@ -15,7 +17,7 @@ PX4 ở `../..` (bản build SITL, model `standard_vtol` và airframe 4004):
 cd PX4-Autopilot/examples && git clone git@github.com:do010303/VTOL-mapping.git
 ```
 
-Mọi lệnh chạy trong `examples/VTOL-mapping/`. Không có trong repo (sinh lại hoặc tự tạo khi chạy): `models/forest/`
+Mọi lệnh chạy trong `examples/VTOL-mapping/`. Không có trong repo (sinh lại hoặc tự tạo khi chạy): `models/forest*/`
 (`scripts/make_forest.py`), `out/`, `run/`.
 
 ## Chuẩn bị (một lần)
@@ -24,13 +26,26 @@ Cần: PX4 SITL đã build (`build/px4_sitl_mapping` hoặc `build/px4_sitl_defa
 opencv, pillow, matplotlib, scipy, pymavlink.
 
 ```bash
-python3 scripts/make_forest.py      # rừng 1,4 × 1,4 km (seed 2026), ~10 s, 217 MB mesh trong models/forest/ (không commit)
-python3 scripts/make_models.py      # payload, VTOL, các world, config/sensors*.json
+python3 scripts/make_forest.py                                   # rừng phẳng 2 × 2 km (seed 2026), ~1 phút, 600 MB
+python3 scripts/make_forest.py --terrain slope --name forest_slope   # rừng dốc 2,5° + đồi ±8 m, 750 MB
+python3 scripts/make_models.py      # payload, máy bay (cw30e_mapping, standard_vtol_mapping), world, config/
 ```
+
+Cảnh (mục 6 của tài liệu):
+
+| World | Cảnh | Dùng cho |
+|---|---|---|
+| `forest`, `forest_static` | 2 × 2 km, đất phẳng, 129 554 cây 10–30 m, tán có texture | Cấu hình chính |
+| `forest_slope`, `forest_slope_static` | Như trên trên địa hình dốc 2,5° về phía đông + đồi ±8 m; vùng cất cánh phẳng | Cảnh dốc của tài liệu |
+| `forest_1400`, `forest_1400_static` | Rừng 1,4 km của giai đoạn 1–2 (màu trơn) | Tái lập R1–R6 (`python3 scripts/make_forest.py --size 1400 --name forest_1400` không tái tạo đúng cảnh cũ: cảnh cũ giữ nguyên trong `models/forest_1400/`) |
+
+Dữ liệu chuẩn của từng cảnh nằm trong `models/<cảnh>/`: `truth.npz` (DTM, DSM, CHM 1 m và lưới địa hình chính
+xác), `trees.csv` (cây, kèm `ground_z_m`), `forest.json` (seed, thông số). Mỗi lượt chạy ghi tên cảnh vào
+`out/<run>/sensors.json` (`scene`), nên các script báo cáo tự lấy đúng dữ liệu chuẩn.
 
 Đổi thông số cảm biến bằng tham số của `make_models.py`, rồi chạy lại các bài thử, ví dụ:
 
-- `--max-range 880`: chế độ 600 kHz.
+- `--max-range 1200`: chế độ 300 kHz (mặc định 880 m: chế độ 600 kHz của tài liệu).
 - `--image full`: ảnh 9504 × 6336.
 - `--line-rate`, `--rays`, `--scan-half-deg`.
 
@@ -52,19 +67,32 @@ Kết quả nằm trong `out/<world>_<thời gian>/`:
 - `overlay_h<H>.jpg`: đỉnh cây và dòng LiDAR chiếu lên ảnh.
 - `h<H>/`: dữ liệu gốc.
 
-**Bay PX4.** Hai terminal:
+**Bay PX4.** Máy bay mặc định là `cw30e_mapping`: quadplane cỡ JOUAV CW‑30E (sải cánh 4,4 m, dài 2,4 m, 38 kg
+gồm cả tải cảm biến, bay bằng 25 m/s), dựng từ `standard_vtol` của PX4 (cùng bố trí 4 rotor nâng + 1 đẩy, cùng
+airframe 4004) với kích thước, khối lượng, quán tính, cánh, đuôi và động cơ tính lại; tham số PX4 riêng trong
+`config/cw30e_px4_params.json` (sinh bởi `make_models.py`). JOUAV không công bố số liệu khí động, nên đây là máy
+bay đúng cỡ và đúng chế độ bay, không phải động lực học thật của CW‑30E. `VEHICLE=standard_vtol` dùng lại máy bay
+5 kg của giai đoạn 1–2.
+
+Một lệnh cho cấu hình chính của tài liệu (600 m, 25 m/s, 10 tuyến cách 95 m, ảnh chỉ trong vùng rừng), kể cả xử lý:
 
 ```bash
-./run_sitl.sh                                   # terminal 1: Gazebo + PX4 (standard_vtol_mapping) + các node; GUI=1 để xem
+scripts/main_run.sh                                    # rừng phẳng -> out/main_forest_<thời gian>/
+WORLD=forest_slope scripts/main_run.sh                 # rừng dốc
+```
+
+Hoặc từng bước, hai terminal:
+
+```bash
+./run_sitl.sh                                   # terminal 1: Gazebo + PX4 (cw30e_mapping) + các node; GUI=1 để xem
 scripts/vtol_mission.py                         # terminal 2: cất cánh, leo vòng lên 500 m, 1 tuyến x = 0, hạ cánh tại home
 python3 scripts/flight_report.py out/flight_<thời gian> --planned-x 0      # sau khi hạ cánh (Ctrl+C terminal 1)
 ```
 
-Cấu hình chính của tài liệu (600 m, 25 m/s, 10 tuyến cách 95 m, ảnh chỉ trong vùng rừng):
-
 ```bash
-AIRSPEED=25 MIN_ALT=550 TRIGGER_BOX="-700 700 -700 700" ./run_sitl.sh
+MIN_ALT=550 TRIGGER_BOX="-700 700 -700 700" IMG=jpg ./run_sitl.sh
 scripts/vtol_mission.py --alt 600 --lines 10 --spacing 95
+python3 scripts/lidar_exact.py out/flight_<thời gian>
 python3 scripts/flight_report.py out/flight_<thời gian> --planned-x -427.5 -332.5 -237.5 -142.5 -47.5 47.5 142.5 237.5 332.5 427.5
 python3 scripts/export_dataset.py out/flight_<thời gian> --lines 10 --spacing 95
 ```
@@ -74,23 +102,59 @@ python3 scripts/export_dataset.py out/flight_<thời gian> --lines 10 --spacing 
   - `--run-in 350`: đoạn vào tuyến ở mỗi đầu. Sau vòng quay đầu 95 m ở 25 m/s, quỹ đạo cần khoảng 400 m để ổn định.
   - `--stop-after-lines`: thoát sau tuyến cuối; PX4 vẫn tự hạ cánh.
 - `run_sitl.sh`:
-  - `AIRSPEED`: tốc độ bay. Trên 18 m/s, giới hạn FW_AIRSPD_MAX tự được nâng.
+  - `WORLD`: `forest` (mặc định), `forest_slope`, `forest_1400`. `VEHICLE`: `cw30e` (mặc định), `standard_vtol`.
+  - `AIRSPEED`: tốc độ bay (cw30e: 25 m/s; standard_vtol: 17, trên 18 m/s thì FW_AIRSPD_MAX tự được nâng).
   - `THR_MAX`: giới hạn ga.
   - `MIN_ALT`: các node chỉ ghi và kích chụp ở trên độ cao này.
   - `TRIGGER_BOX`: camera chỉ chụp trong vùng này.
-  - `VIEW=0`: không ghi video camera view.
+  - `VIEW=0`: không ghi video camera view. `IMG=jpg`: ảnh JPEG chất lượng 95 (~4 MB) thay vì PNG (~16 MB).
 - Thời gian bay: 1 tuyến ở 500 m khoảng 14 phút; 10 tuyến ở 600 m khoảng 30 phút.
 - Khi có GUI, mô phỏng chạy ở khoảng 0,5 lần thời gian thực (không GUI: 0,9).
 
 **Camera view.** Có một camera xem trước cùng vị trí và cùng FOV với camera chính (792 × 528, 10 Hz):
 
 - Khi chạy `GUI=1`, nó hiện thành panel "Camera view" trong cửa sổ Gazebo.
-- Mỗi lượt chạy đều ghi video `camera_view.mp4`, với vạch đỏ là dải quét LiDAR, thước 50 m, thời gian, độ cao và
-  tốc độ.
+- Mỗi lượt chạy đều ghi video `camera_view.mp4` (`VIEW=0` để tắt).
+- Cửa sổ gồm ba phần:
+  - **Ảnh camera.** Điểm LiDAR của 1 s gần nhất chiếu lên ảnh, màu theo độ cao trên địa hình (0–30 m). Bên dưới là
+    mặt cắt ngang của dòng quét mới nhất.
+  - **Panel LiDAR.** Thông số máy quét, rồi số liệu trực tiếp: dòng/s, % tia có phản hồi, điểm/s, cự ly
+    min/trung vị/max, độ cao LiDAR trên mặt đất, bề rộng dải quét, khoảng cách dòng quét, mật độ điểm, % chạm đất,
+    chiều cao tán p95. Tiếp theo là tổng số dòng/điểm, diện tích đã phủ, thang màu, và bản đồ nhìn từ trên mọi ô
+    5 m đã quét (màu theo chiều cao tán), kèm vị trí, hướng máy bay và khung ảnh camera.
+  - **Panel hiệu năng.** RTF, độ trễ, FPS, CPU/RAM từng tiến trình, GPU.
 - `scripts/camera_window.sh` mở cửa sổ riêng hiện camera view trực tiếp bên cạnh một sim đang chạy (có GUI hay không
   đều được). Nhấn `q`/`Esc` hoặc đóng cửa sổ để thoát; sim vẫn chạy tiếp. Với mô hình tĩnh:
   `scripts/camera_window.sh forest_static vtol_rig`.
 - Camera này chỉ để xem, không dùng cho mapping.
+
+**LiDAR đúng lịch phát tia** (`scripts/lidar_exact.py`, mục 2 của tài liệu). Gazebo vẽ cả dòng quét tại một
+thời điểm. Script này dò lại từng tia trên chính mesh của cảnh (Open3D): tia k phát ở t_s + k/600 000 s với pose
+nội suy tại đúng thời điểm đó, góc danh nghĩa, không cần hiệu chuẩn. Khoảng 2 triệu tia/s.
+
+```bash
+python3 scripts/lidar_exact.py out/<run>         # -> out/<run>/lidar_exact/ (+ so sánh từng tia với Gazebo)
+```
+
+`flight_report.py` và `export_dataset.py` tự dùng `lidar_exact/` nếu có (`--lidar gz` để dùng bản Gazebo); báo
+cáo khi đó có hậu tố `_exact`.
+
+**Map 3D và RViz** (`scripts/lidar_map.py`, giống `ground_map.py` của px4-mapping). Node ghép point cloud thành
+map voxel (mặc định 1 m), ước lượng mặt đất (điểm thấp nhất trong 11 m) và chiều cao tán, chỉ từ dữ liệu LiDAR:
+
+```bash
+scripts/lidar_rviz.sh                    # trực tiếp, cạnh ./run_sitl.sh đang chạy: node + RViz
+scripts/lidar_rviz.sh out/r5_main 20     # phát lại một lượt bay, nhanh gấp 20
+python3 scripts/lidar_map.py out/r5_main # chỉ dựng và lưu map
+```
+
+Topic RViz (frame `map` = ENU thế giới): `/vtol/lidar/scan` (điểm của 1 s gần nhất), `/vtol/lidar/map` (voxel,
+màu theo độ cao trên mặt đất), `/vtol/lidar/ground`, `/vtol/path`, `/vtol/vehicle`, `/vtol/camera_footprint`.
+Khi dừng, map được lưu thành `lidar_map.npz`, `lidar_map.ply` (mở bằng CloudCompare/MeshLab) và `lidar_map.png`.
+
+**Kiểm tra ảnh cho SfM** (mục 6, 9.5): `python3 scripts/sfm_check.py out/<run>` ghép SIFT giữa các cặp ảnh dọc
+tuyến và ngang tuyến, rồi dùng pose thật để đếm cặp điểm khớp đúng hình học. `scripts/texture_pairs.sh` làm
+việc đó với rig tĩnh (6 ảnh ở 600 m), để thử texture của một cảnh mà không cần bay.
 
 **Xuất dữ liệu** (`scripts/export_dataset.py`, mục 8 của tài liệu) vào `out/<run>/export/`:
 
@@ -128,10 +192,12 @@ Hai hiệu chuẩn này ghi vào `config/lidar_angles.json`. Các script báo c�
 | `camera/img_*.png`, `images.csv` | Ảnh RGB; image_id, t_s, pose thân lúc chụp, thời điểm trigger |
 | `camera/camera_info.json` | K, kích thước, méo do Gazebo phát |
 | `cloud_line.npz` | (flight_report) xyz + t các điểm trên tuyến |
-| `models/forest/truth.npz`, `trees.csv` | DTM, DSM, CHM chuẩn 1 m; danh sách cây (vị trí, cao, tán, hướng) |
+| `lidar_exact/scans_*.npz` | (lidar_exact.py) như trên, tia k phát ở `t_s + k · pulse_spacing_s` |
+| `models/<cảnh>/truth.npz`, `trees.csv` | DTM, DSM, CHM chuẩn 1 m, lưới địa hình; danh sách cây (vị trí, cao, tán, hướng, độ cao gốc) |
 
-Hướng tia k: d_L = chuẩn hóa(γ_k, sin β_k, −cos β_k), với β_k và γ_k lấy từ `config/lidar_angles.json`.
-Điểm: p_W = T_WB(t) · (t_BL + range · d_L).
+Bản Gazebo: hướng tia k là d_L = chuẩn hóa(γ_k, sin β_k, −cos β_k), với β_k và γ_k lấy từ
+`config/lidar_angles.json`; điểm p_W = T_WB(t_s) · (t_BL + range · d_L). Bản `lidar_exact`: góc danh nghĩa
+β_k = −20° + k · 0,030°, γ = 0, và p_W = T_WB(t_s + k/600 000) · (t_BL + range · d_L).
 
 ## Lưu ý
 

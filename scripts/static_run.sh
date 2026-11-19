@@ -5,6 +5,7 @@
 #   scripts/static_run.sh                       # forest, 500 m, 10 s of sim time
 #   HEIGHTS="500 600 880 1000 1200 1300" scripts/static_run.sh     # range threshold sweep, one server
 #   WORLD=flat_static scripts/static_run.sh     # bare ground: range accuracy against H / cos(beta)
+#   WORLD=forest_slope_static scripts/static_run.sh   # the sloping forest (H is above z = 0, not above the terrain)
 #   GUI=1 scripts/static_run.sh                 # with the Gazebo GUI (and its camera view panel)
 #   VIEW=0 ...                                  # no camera-view video (h<H>/camera_view.mp4)
 #
@@ -20,7 +21,16 @@ HEIGHTS="${HEIGHTS:-500}"
 DURATION="${DURATION:-10}"
 OUT="${OUT:-$HERE/out/${WORLD}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$OUT"
-cp "$HERE/config/sensors.json" "$OUT/sensors.json"
+case "$WORLD" in
+	forest_slope*) SCENE=forest_slope ;;
+	forest_1400*) SCENE=forest_1400 ;;
+	*) SCENE=forest ;;
+esac
+python3 -c '
+import json, sys
+c = json.load(open(sys.argv[1]))
+c.update(scene=sys.argv[3], world=sys.argv[4])
+json.dump(c, open(sys.argv[2], "w"), indent=2)' "$HERE/config/sensors.json" "$OUT/sensors.json" "$SCENE" "$WORLD"
 
 sim_start "$WORLD"
 

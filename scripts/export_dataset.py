@@ -22,7 +22,6 @@
 
 import argparse
 import datetime
-import glob
 import json
 import math
 import os
@@ -30,8 +29,9 @@ import struct
 
 import numpy as np
 
-from flight_report import interp_poses
-from static_report import ROOT, Truth, lidar_dirs, load_scans, quat_to_matrix
+from flight_report import interp_poses, lidar_source, world_points
+from scene import Truth, scene_of_run
+from static_report import ROOT, image_file, lidar_dirs, load_scans, quat_to_matrix
 from strips import segment, strip_of_time
 
 LAS_SCALE = 0.001
@@ -103,6 +103,8 @@ def main():
     ap.add_argument("--margin", type=float, default=100.0, help="LAS: keep points within eval area + margin, m")
     ap.add_argument("--no-crop", action="store_true", help="LAS: every point of the strips")
     ap.add_argument("--decimate", type=int, default=1, help="LAS: every n-th scan line")
+    ap.add_argument("--lidar", choices=("auto", "gz", "exact"), default="auto",
+                    help="auto: lidar_exact/ (scripts/lidar_exact.py) if it exists, else the Gazebo recording")
     args = ap.parse_args()
     run = args.run
     planned = args.planned_x
@@ -116,9 +118,10 @@ def main():
     lc, cc = cfg["lidar"], cfg["camera"]
     cal_path = os.path.join(ROOT, "config", "lidar_angles.json")
     cal = json.load(open(cal_path)) if os.path.exists(cal_path) else None
-    d_l, beta = lidar_dirs(cfg)
+    sub, exact = lidar_source(run, args.lidar)
+    d_l, beta = lidar_dirs(cfg, calibrated=not exact)
     gamma = d_l[:, 0] / np.hypot(d_l[:, 1], d_l[:, 2])
-    truth = Truth()
+    truth = Truth(scene_of_run(run))
 
     # Trajectory with strips.
     traj = np.loadtxt(os.path.join(run, "trajectory.csv"), delimiter=",", skiprows=1)
@@ -134,7 +137,7 @@ def main():
     pose_dt = np.diff(traj[:, 0])
 
     # LiDAR per strip.
-    t, r = load_scans(run)
+    t, r = load_scans(run, sub)
     sid_lines = strip_of_time(strips, t)
     x0, x1, y0, y1 = args.eval
     m = 0 if args.no_crop else args.margin
@@ -145,20 +148,14 @@ def main():
         sel = np.nonzero(sid_lines == st["id"])[0]
         np.savez_compressed(os.path.join(ex, "lidar", f"strip_{st['id']:02d}.npz"), t_s=t[sel], scanline_id=sel,
                             strip_id=st["id"], beta_rad=beta, gamma_rad=gamma, range_m=r[sel],
-                            pulse_spacing_s=lc["pulse_spacing_s"])
+                            pulse_spacing_s=lc["pulse_spacing_s"], per_ray_times=exact)
         totals["rays"] += r[sel].size
         sel = sel[::args.decimate]
-        p, rot = interp_poses(traj, t[sel])
-        o = p + np.einsum("nij,j->ni", rot, np.array(lc["t_BL"]))
         xyz_l, tt_l, ang_l = [], [], []
-        for a in range(0, len(sel), 2000):
-            sl = slice(a, a + 2000)
-            rr = r[sel][sl]
-            hit = np.isfinite(rr)
-            pts = o[sl, None, :] + np.where(hit, rr, 0)[..., None] * np.einsum("nij,kj->nki", rot[sl], d_l)
-            xyz_l.append(pts[hit])
-            tt_l.append(np.repeat(t[sel][sl][:, None], rr.shape[1], axis=1)[hit])
-            ang_l.append(np.repeat(np.degrees(beta)[None, :], rr.shape[0], axis=0)[hit])
+        for sl, pts, tk, hit in world_points(cfg, t[sel], r[sel], traj, exact):
+            xyz_l.append(pts)
+            tt_l.append(tk)
+            ang_l.append(np.broadcast_to(np.degrees(beta)[None, :], hit.shape)[hit])
         xyz, tt, ang = np.concatenate(xyz_l), np.concatenate(tt_l), np.concatenate(ang_l)
         if not args.no_crop:
             keep = (xyz[:, 0] >= x0 - m) & (xyz[:, 0] <= x1 + m) & (xyz[:, 1] >= y0 - m) & (xyz[:, 1] <= y1 + m)
@@ -166,7 +163,7 @@ def main():
         path = os.path.join(ex, "las", f"strip_{st['id']:02d}.las")
         write_las(path, xyz, tt, st["id"], ang)
         # Truth labels from the scene.
-        ground = np.abs(xyz[:, 2]) < 0.05
+        ground = np.abs(xyz[:, 2] - truth.dtm_at(xyz[:, 0], xyz[:, 1])) < 0.05
         if kd is None:
             from scipy.spatial import cKDTree
             kd = cKDTree(np.stack([truth.trees["x_m"], truth.trees["y_m"]], axis=1))
@@ -211,7 +208,7 @@ def main():
             r_cw = r_wc.T
             tvec = -r_cw @ c_w
             q = rot_to_quat(r_cw)
-            name = "img_%05d.png" % im["image_id"][k]
+            name = image_file(im, k)
             f.write(f"{im['image_id'][k] + 1} {q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {q[3]:.9f} "
                     f"{tvec[0]:.4f} {tvec[1]:.4f} {tvec[2]:.4f} 1 {name}\n\n")
             g.write(f"{name} {c_w[0]:.4f} {c_w[1]:.4f} {c_w[2]:.4f}\n")
@@ -220,7 +217,7 @@ def main():
     open(os.path.join(col, "points3D.txt"), "w").write("# empty: poses are given, run point_triangulator\n")
     # Consistency: tree tops projected with the COLMAP pose land where the overlay projection puts them.
     k, r_cw, tvec = rows[len(rows) // 2]
-    tw = np.stack([truth.trees["x_m"], truth.trees["y_m"], truth.trees["height_m"]], axis=1)
+    tw = np.stack([truth.trees["x_m"], truth.trees["y_m"], truth.trees["height_m"] + truth.tree_z0], axis=1)
     pc = tw @ r_cw.T + tvec
     vis = pc[:, 2] > 0
     u = cc["fx"] * pc[vis, 0] / pc[vis, 2] + cc["cx"]
@@ -228,15 +225,16 @@ def main():
     from static_report import project
     r_wb = quat_to_matrix(im["qx"][k], im["qy"][k], im["qz"][k], im["qw"][k])
     u2, v2, _ = project(cfg, tw[vis], np.array([im["x_m"][k], im["y_m"][k], im["z_m"][k]]), r_wb)
-    colmap_check = {"image": "img_%05d.png" % im["image_id"][k], "max_px_diff_vs_overlay": float(max(np.abs(u - u2).max(), np.abs(v - v2).max()))}
+    colmap_check = {"image": image_file(im, k), "max_px_diff_vs_overlay": float(max(np.abs(u - u2).max(), np.abs(v - v2).max()))}
 
     # Image overlap (9.5): how many survey images see each 5 m cell of the eval area at the canopy top (30 m)
     # and on the ground.
     g5 = np.arange(x0 + 2.5, x1, 5.0), np.arange(y0 + 2.5, y1, 5.0)
     gx, gy = np.meshgrid(*g5)
     seen = {}
+    g_dtm = truth.dtm_at(gx.ravel(), gy.ravel())
     for zc in (30.0, 0.0):
-        pts = np.stack([gx.ravel(), gy.ravel(), np.full(gx.size, zc)], axis=1)
+        pts = np.stack([gx.ravel(), gy.ravel(), g_dtm + zc], axis=1)
         n_img = np.zeros(gx.size, dtype=int)
         for _, r_cw, tvec in rows:
             pc = pts @ r_cw.T + tvec
@@ -247,7 +245,8 @@ def main():
     # Spacing and overlaps from the poses.
     sp = np.concatenate([np.hypot(np.diff(im["x_m"][si == s["id"]]), np.diff(im["y_m"][si == s["id"]]))
                          for s in strips if (si == s["id"]).sum() > 1])
-    h_mean = float(np.mean([c[2] for c in centres]))
+    cen = np.array(centres)
+    h_mean = float(np.mean(cen[:, 2] - truth.dtm_at(cen[:, 0], cen[:, 1])))          # above the terrain
     along = 2 * (h_mean - 30) * math.tan(math.radians(cc["vfov_deg"] / 2))
     across = 2 * (h_mean - 30) * math.tan(math.radians(cc["hfov_deg"] / 2))
     xs = sorted(s["x_nominal"] for s in strips)
@@ -280,15 +279,20 @@ def main():
         "sensors": cfg, "lidar_angle_calibration": None if cal is None else
         {k: cal[k] for k in cal if k not in ("beta_rad", "gamma_rad")},
         "lidar_ray_direction": "d_L = normalize(gamma, sin(beta), -cos(beta)); p_W = T_WB(t) (t_BL + range d_L)",
-        "lidar_timing": "Gazebo renders each scan line at one instant: t_s of the line is the time of all its rays "
-                        "(pulse_spacing_s is the real scanner's schedule, kept for reference, not applied)",
+        "lidar_source": sub,
+        "lidar_timing": ("per ray: ray k of a line is emitted at t_s + k * pulse_spacing_s and was cast from the pose at that "
+                         "time (scripts/lidar_exact.py, spec 2); LAS gps_time is the ray's own time") if exact else
+                        ("Gazebo renders each scan line at one instant: t_s of the line is the time of all its rays "
+                         "(pulse_spacing_s is the real scanner's schedule, kept for reference, not applied)"),
         "strips": checks["strips"], "planned_x": planned, "y_range": args.y_range, "eval_area": args.eval,
         "files": {"trajectory.csv": "vehicle pose (body FLU -> world ENU), strip_id 0 = transit",
                   "lidar/": "raw per-strip measurements", "las/": "LAS 1.2 PDRF 1 point clouds, local ENU, no CRS",
                   "truth/": "labels from the scene, same point order as las/", "colmap/": "COLMAP text model, images in ../camera",
-                  "truth_rasters": os.path.join(ROOT, "models", "forest", "truth.npz")},
+                  "truth_rasters": os.path.join("models", truth.scene, "truth.npz")},
+        "scene": truth.scene,
+        "scene_params": json.load(open(os.path.join(ROOT, "models", truth.scene, "forest.json"))),
         "ideal_assumptions": ["no wind", "exact pose", "pinhole camera, instantaneous exposure", "thin rays, single return",
-                              "hard range limit, no reflectance model", "flat terrain"],
+                              "hard range limit, no reflectance model"] + (["flat terrain"] if truth.flat else []),
     }
     json.dump(meta, open(os.path.join(ex, "config.json"), "w"), indent=2)
 

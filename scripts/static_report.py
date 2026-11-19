@@ -33,15 +33,22 @@ def quat_to_matrix(x, y, z, w):
     ])
 
 
-def load_scans(d):
+def load_scans(d, sub="lidar"):
     t, r = [], []
-    for f in sorted(glob.glob(os.path.join(d, "lidar", "scans_*.npz"))):
+    for f in sorted(glob.glob(os.path.join(d, sub, "scans_*.npz"))):
         z = np.load(f)
         t.append(z["t_s"])
         r.append(z["ranges_m"])
     if not t:
         return None, None
     return np.concatenate(t), np.concatenate(r)
+
+
+def image_file(im, k):
+    """File name of image k of an images.csv read with np.genfromtxt (which renames the column "file" to "file_")."""
+    names = im.dtype.names
+    col = "file" if "file" in names else ("file_" if "file_" in names else None)
+    return str(im[col][k]) if col else "img_%05d.png" % im["image_id"][k]
 
 
 def rig_pose(d):
@@ -85,43 +92,7 @@ def lidar_points(cfg, ranges, p_wb, r_wb):
     return p_b @ r_wb.T + p_wb, beta
 
 
-class Truth:
-    def __init__(self):
-        z = np.load(os.path.join(ROOT, "models", "forest", "truth.npz"))
-        self.x, self.y, self.dsm = z["x"], z["y"], z["dsm"]
-        self.cell = self.x[1] - self.x[0]
-        self.trees = np.genfromtxt(os.path.join(ROOT, "models", "forest", "trees.csv"), delimiter=",",
-                                   names=True, dtype=None, encoding=None)
-
-    def surface_at(self, x, y):
-        """Exact height of the highest crown surface above each (x, y), from the tree list (0: open ground)."""
-        from scipy.spatial import cKDTree
-        tr = self.trees
-        if not hasattr(self, "kd"):
-            self.kd = cKDTree(np.stack([tr["x_m"], tr["y_m"]], axis=1))
-        sides, out = 7, np.zeros(len(x))
-        sector = 2 * np.pi / sides
-        _, idx = self.kd.query(np.stack([x, y], axis=1), k=12, distance_upper_bound=5.0)
-        for c in range(idx.shape[1]):
-            i = idx[:, c]
-            ok = i < len(tr)
-            ii = i[ok]
-            dx, dy = x[ok] - tr["x_m"][ii], y[ok] - tr["y_m"][ii]
-            d = np.hypot(dx, dy)
-            a = np.mod(np.arctan2(dy, dx) - tr["yaw_rad"][ii], sector) - sector / 2
-            edge = tr["crown_radius_m"][ii] * np.cos(sector / 2) / np.cos(a)
-            h, low = tr["height_m"][ii], tr["crown_low_m"][ii]
-            z = np.where(d <= edge, h - (h - low) * d / edge, 0.0)
-            out[ok] = np.maximum(out[ok], z)
-        return out
-
-    def dsm_at(self, x, y):
-        j = np.round((x - self.x[0]) / self.cell).astype(int)
-        i = np.round((y - self.y[0]) / self.cell).astype(int)
-        ok = (i >= 0) & (i < len(self.y)) & (j >= 0) & (j < len(self.x))
-        out = np.full(x.shape, np.nan)
-        out[ok] = self.dsm[i[ok], j[ok]]
-        return out
+from scene import Truth, scene_of_run  # noqa: E402,F401  (Truth is re-exported for the other reports)
 
 
 def project(cfg, p_w, p_wb, r_wb):
@@ -149,6 +120,9 @@ def analyse(run, d, cfg, truth, world):
     lc = cfg["lidar"]
     z_l = p_wb[2] + (r_wb @ np.array(lc["t_BL"]))[2]
     out["lidar_height_m"] = float(z_l)
+    if truth is not None:                       # height above the terrain under the LiDAR (sloping scene)
+        z_l -= float(truth.dtm_at(p_wb[0], p_wb[1]))
+        out["lidar_agl_m"] = float(z_l)
     pts, beta = lidar_points(cfg, r, p_wb, r_wb)
     hit = np.isfinite(r)
     out["return_ratio"] = float(hit.mean())
@@ -174,17 +148,21 @@ def analyse(run, d, cfg, truth, world):
                                     "p99_abs": float(np.percentile(np.abs(err), 99))}
             out["ground_z_m"] = {"mean": float(z.mean()), "std": float(z.std())}
         else:
+            xy = pts[..., :2][hit]
+            z_abs = z
+            z = z - truth.dtm_at(xy[:, 0], xy[:, 1])          # height above the terrain
             ground = z < 0.5
             out["ground_return_ratio"] = float(ground.mean())
-            xy = pts[..., :2][hit]
+            out["ground_z_minus_dtm_m"] = {"mean": float(z[ground].mean()), "std": float(z[ground].std()),
+                                           "max_abs": float(np.abs(z[ground]).max())} if ground.any() else None
             ds = truth.dsm_at(xy[:, 0], xy[:, 1])
             veg = ~ground & np.isfinite(ds)
-            res = z[veg] - ds[veg]
+            res = z_abs[veg] - ds[veg]
             out["veg_z_minus_dsm_m"] = {"median": float(np.median(res)), "p05": float(np.percentile(res, 5)),
                                         "p95": float(np.percentile(res, 95)),
                                         "above_dsm_0.3m": float(np.mean(res > 0.3))} if veg.any() else None
             sub = np.random.default_rng(0).choice(len(z), min(len(z), 400000), replace=False)
-            ex = z[sub] - truth.surface_at(xy[sub, 0], xy[sub, 1])
+            ex = z_abs[sub] - truth.surface_at(xy[sub, 0], xy[sub, 1])
             out["returns_vs_surface_m"] = {"above_by_5cm": float(np.mean(ex > 0.05)), "max_above": float(ex.max()),
                                            "on_top_surface_within_5cm": float(np.mean(np.abs(ex) < 0.05))}
             out["veg_height_m"] = {"mean": float(z[~ground].mean()), "max": float(z[~ground].max())} \
@@ -198,16 +176,18 @@ def analyse(run, d, cfg, truth, world):
                                                      [[c["fx"], 0, c["cx"]], [0, c["fy"], c["cy"]], [0, 0, 1]], atol=1e-2)
     out["camera_size_ok"] = info.get("width") == c["width"] and info.get("height") == c["height"]
     cam_h = p_wb[2] + (r_wb @ np.array(c["t_BC"]))[2]
+    if truth is not None:
+        cam_h -= float(truth.dtm_at(p_wb[0], p_wb[1]))
     out["gsd_ground_cm"] = float(cam_h * 35.7e-3 / 35e-3 / c["width"] * 100)
     out["footprint_ground_m"] = [float(2 * cam_h * math.tan(math.radians(c["hfov_deg"] / 2))),
                                  float(2 * cam_h * math.tan(math.radians(c["vfov_deg"] / 2)))]
-    imgs = sorted(glob.glob(os.path.join(d, "camera", "img_*.png")))
+    imgs = sorted(glob.glob(os.path.join(d, "camera", "img_*.*")))
     if imgs:
         img = cv2.imread(imgs[-1])
         out["image_mean_rgb"] = img.reshape(-1, 3)[:, ::-1].mean(axis=0).round(1).tolist()
         # Tree tops in view.
         if truth is not None and world != "flat_static":
-            tw = np.stack([truth.trees["x_m"], truth.trees["y_m"], truth.trees["height_m"]], axis=1)
+            tw = np.stack([truth.trees["x_m"], truth.trees["y_m"], truth.trees["height_m"] + truth.tree_z0], axis=1)
             u, v, zc = project(cfg, tw, p_wb, r_wb)
             inside = (zc > 0) & (u >= 0) & (u < c["width"]) & (v >= 0) & (v < c["height"])
             out["trees_in_image"] = int(inside.sum())
@@ -246,7 +226,7 @@ def main():
     cfg = json.load(open(os.path.join(args.run, "sensors.json")))
     dirs = sorted(glob.glob(os.path.join(args.run, "h*")), key=lambda p: float(os.path.basename(p)[1:]))
     world = json.load(open(os.path.join(dirs[0], "run.json")))["world"]
-    truth = Truth() if world != "flat_static" else None
+    truth = Truth(scene_of_run(args.run)) if world != "flat_static" else None
     rows, curves = [], []
     for d in dirs:
         o, pa, beta = analyse(args.run, d, cfg, truth, world)
