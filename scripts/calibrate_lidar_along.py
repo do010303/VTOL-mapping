@@ -11,7 +11,6 @@ Adds gamma_rad (ray direction d_L = normalize(gamma, sin beta, -cos beta)) to co
 
   python3 scripts/calibrate_lidar_along.py out/sync_slant out/sync_slant_lr50 out/sync_slant_lr100
 """
-import glob
 import json
 import os
 import sys

@@ -21,7 +21,7 @@ RViz (--rviz; frame "map" = world ENU, metres; rviz2 -d rviz/lidar.rviz, or scri
   /vtol/vehicle           the vehicle (Marker, CW-30E-sized) and /vtol/camera_footprint (the image's footprint)
 
 At the end (Ctrl+C, or the replay's end) it writes <out>/lidar_map.npz (voxels, hits, ground and DSM grids),
-<out>/lidar_map.ply (voxel centres, for CloudCompare / MeshLab) and <out>/lidar_map.png (top view).
+<out>/lidar_map.ply (voxel centres, for CloudCompare / MeshLab: only with --ply) and <out>/lidar_map.png (top view).
 
   scripts/lidar_map.py out/r5_main --rviz --speed 20          # replay R5 20x faster, in RViz
   scripts/lidar_map.py out/r5_main                             # just build and save the map
@@ -156,19 +156,27 @@ class LidarMap:
         i, j = self._unkey(ck, False)
         return (i + 0.5) * GROUND_CELL, (j + 0.5) * GROUND_CELL, zmin, zmax
 
-    def save(self, out):
+    def save(self, out, ply=False):
         self.merge()
         c, hits, h = self.voxels()
         x, y, zmin, zmax = self.columns()
         np.savez_compressed(os.path.join(out, "lidar_map.npz"), voxel_m=self.v, centres=c.astype(np.float32),
                             hits=hits.astype(np.int32), height=h.astype(np.float32), col_x=x, col_y=y,
                             col_zmin=zmin.astype(np.float32), col_zmax=zmax.astype(np.float32), points=self.points)
+        if ply:                         # the same voxels as the npz: only on request (disk)
+            self._ply(out, c, h, hits)
+        self._png(out, x, y, zmin, zmax)
+        return self._info(c, x)
+
+    def _ply(self, out, c, h, hits):
         with open(os.path.join(out, "lidar_map.ply"), "wb") as f:
             f.write((f"ply\nformat binary_little_endian 1.0\nelement vertex {len(c)}\nproperty float x\n"
                      "property float y\nproperty float z\nproperty float height\nproperty int hits\nend_header\n").encode())
             rec = np.zeros(len(c), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("h", "<f4"), ("n", "<i4")])
             rec["x"], rec["y"], rec["z"], rec["h"], rec["n"] = c[:, 0], c[:, 1], c[:, 2], h, hits
             f.write(rec.tobytes())
+
+    def _png(self, out, x, y, zmin, zmax):
         if len(x):
             import matplotlib
             matplotlib.use("Agg")
@@ -188,6 +196,8 @@ class LidarMap:
                 fig.colorbar(s, ax=a, shrink=0.7)
             fig.tight_layout()
             fig.savefig(os.path.join(out, "lidar_map.png"), dpi=110)
+
+    def _info(self, c, x):
         return {"points": int(self.points), "voxels": int(len(c)), "voxel_m": self.v, "columns_1m": int(len(x)),
                 "area_m2": float(len(x) * GROUND_CELL ** 2)}
 
@@ -282,6 +292,7 @@ def main():
     ap.add_argument("--config", help="live: sensors json (default config/sensors_flight.json)")
     ap.add_argument("--out", help="where to save the map (default <run>, live: out/live_map_<time>)")
     ap.add_argument("--rviz", action="store_true")
+    ap.add_argument("--ply", action="store_true", help="also write lidar_map.ply (CloudCompare / MeshLab)")
     ap.add_argument("--voxel", type=float, default=1.0, help="voxel size, m")
     ap.add_argument("--every", type=int, default=1, help="use every n-th ray")
     ap.add_argument("--speed", type=float, default=0, help="replay: x real time (0: as fast as possible)")
@@ -412,7 +423,7 @@ def main():
                     gz_ = 0.0 if not np.isfinite(gz_) else gz_
                     rv.vehicle(pose[0], pose[1], camera_footprint(cfg, pose[0], pose[1], gz_))
                 rv.rclpy.spin_once(rv.node, timeout_sec=0)
-        if now - last_print >= 5:
+        if now - last_print >= 5 and not state.get("told"):      # quiet once the replay has finished
             last_print = now
             print(f"t {state['t'] or 0:8.1f} s  points {lmap.points:,}  voxels {len(lmap.keys):,}  "
                   f"columns {len(lmap.ckeys):,}", flush=True)
@@ -422,10 +433,10 @@ def main():
             if not state.get("told"):
                 print("replay finished; the map stays in RViz until Ctrl+C", flush=True)
                 state["told"] = True
-                info = lmap.save(out)
+                info = lmap.save(out, args.ply)
                 print("lidar_map: " + json.dumps(info), flush=True)
     if not state.get("told"):
-        info = lmap.save(out)
+        info = lmap.save(out, args.ply)
         print("lidar_map: " + json.dumps(info), flush=True)
     if rv is not None:
         rv.node.destroy_node()

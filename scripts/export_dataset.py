@@ -7,7 +7,7 @@
     trajectory.csv           t_s, x_m, y_m, z_m, qx, qy, qz, qw, strip_id, segment (survey | transit), 500 Hz
     lidar/strip_<s>.npz      raw measurements per strip: t_s and scanline_id per line, beta_rad / gamma_rad per ray,
                              range_m (lines x rays, inf = no return)
-    las/strip_<s>.las        point cloud, LAS 1.2 point format 1: gps_time = sim time (s), point_source_id = strip,
+    las/strip_<s>.laz        point cloud (LAZ; .las with --las or without laspy + lazrs), LAS 1.2 point format 1: gps_time = sim time (s), point_source_id = strip,
                              scan_angle_rank = beta (deg); local ENU metres, no CRS; classification 0 (not classified)
     truth/labels_strip_<s>.npz   per LAS point, same order: label (1 ground, 2 vegetation) and tree_id (-1 = none),
                              from the scene geometry; kept apart from the LAS (spec 8: labels not given to the algorithm)
@@ -101,6 +101,7 @@ def main():
     ap.add_argument("--y-range", type=float, nargs=2, default=(-650, 650))
     ap.add_argument("--eval", type=float, nargs=4, default=(-400, 400, -400, 400))
     ap.add_argument("--margin", type=float, default=100.0, help="LAS: keep points within eval area + margin, m")
+    ap.add_argument("--las", action="store_true", help="keep plain LAS (default: LAZ when laspy + lazrs exist)")
     ap.add_argument("--no-crop", action="store_true", help="LAS: every point of the strips")
     ap.add_argument("--decimate", type=int, default=1, help="LAS: every n-th scan line")
     ap.add_argument("--lidar", choices=("auto", "gz", "exact"), default="auto",
@@ -186,6 +187,16 @@ def main():
     hdr, xyz_back, rec = read_las(os.path.join(ex, las_info[0]["file"]))
     las_check = {"header": hdr, "src_ids": sorted(set(rec["src"].tolist())),
                  "gps_time_range": [float(rec["t"].min()), float(rec["t"].max())]}
+    if not args.las:
+        # LAZ: the same points, lossless, ~8x smaller (laspy + lazrs: pip install --user laspy lazrs).
+        try:
+            from compact_runs import las_to_laz
+            for li in las_info:
+                out = las_to_laz(os.path.join(ex, li["file"]))
+                li["file"], li["size_MB"] = os.path.relpath(out, ex), os.path.getsize(out) / 1e6
+            las_check["laz"] = True
+        except ImportError:
+            print("laspy/lazrs missing: LAS kept uncompressed (pip install --user laspy lazrs)", flush=True)
 
     # COLMAP.
     im = np.genfromtxt(os.path.join(run, "camera", "images.csv"), delimiter=",", names=True, dtype=None, encoding=None)
@@ -286,7 +297,7 @@ def main():
                          "(pulse_spacing_s is the real scanner's schedule, kept for reference, not applied)"),
         "strips": checks["strips"], "planned_x": planned, "y_range": args.y_range, "eval_area": args.eval,
         "files": {"trajectory.csv": "vehicle pose (body FLU -> world ENU), strip_id 0 = transit",
-                  "lidar/": "raw per-strip measurements", "las/": "LAS 1.2 PDRF 1 point clouds, local ENU, no CRS",
+                  "lidar/": "raw per-strip measurements", "las/": "LAZ (LAS 1.2 PDRF 1) point clouds, local ENU, no CRS",
                   "truth/": "labels from the scene, same point order as las/", "colmap/": "COLMAP text model, images in ../camera",
                   "truth_rasters": os.path.join("models", truth.scene, "truth.npz")},
         "scene": truth.scene,

@@ -140,10 +140,58 @@ bị hệ thống dừng khi có VS Code và trình duyệt mở).
 | `scripts/sfm_check.py`, `scripts/texture_pairs.sh` | Kiểm tra điểm liên kết SfM |
 | `scripts/main_run.sh` | Cấu hình chính một lệnh: bay, dò tia, báo cáo, SfM, map, xuất |
 | `scripts/scene.py` | Dữ liệu chuẩn theo cảnh (DTM chính xác trên địa hình dốc) |
+| `scripts/ground_eval.py` | §9.6: CSF + PTD, DTM/DSM/CHM, một bảng cho nhiều cảnh |
+| `scripts/view_cloud.py` | Xem map 3D (Open3D, nền sáng, bảng số liệu, bật/tắt lớp) |
+| `scripts/compact_runs.py` | Nén lại các lượt trong `out/` không mất dữ liệu |
 
-## 7. Còn lại
+## 7. Tách đất, DTM / DSM / CHM (§9.6)
 
-- CSF/PTD, DTM/CHM từ thuật toán và các chỉ số (§9.6): bạn đã để sau.
+`python3 scripts/ground_eval.py out/main_flat out/main_slope` chạy cả hai cảnh và ghi một bảng chung
+(`out/ground_eval.md`). Dữ liệu: các điểm LiDAR (`lidar_exact`) của 10 tuyến trong vùng 800 × 800 m (+20 m biên).
+Hai bộ lọc chạy trên mẫu con ngẫu nhiên 10 điểm/m² (7,06 triệu điểm), như §9 yêu cầu ghi lại mức giảm mẫu:
+
+- **CSF**: gói `cloth-simulation-filter`, độ phân giải vải 1 m, `class_threshold` 0,5 m, rigidness 3 (phẳng) / 2 (dốc).
+- **PTD**: viết trong script theo Axelsson. Hạt giống là điểm thấp nhất mỗi ô 25 m và mỗi 5 m dọc biên. Mỗi vòng
+  thêm các điểm cách mặt TIN ≤ 0,5 m và có góc tới các đỉnh tam giác ≤ 10°.
+
+Nhãn chuẩn: một điểm là đất khi nằm trong 5 cm quanh địa hình chính xác của cảnh. DTM 1 m nội suy tuyến tính từ
+điểm đất của mỗi bộ lọc. DSM là điểm cao nhất mỗi ô. CHM = DSM − DTM. DSM chuẩn là bề mặt cao nhất thật trong ô:
+lấy 4 × 4 mẫu và thêm điểm gần đỉnh nón tán nhất.
+
+| | Phẳng (`main_flat`) | Dốc (`main_slope`) |
+|---|---:|---:|
+| Tỉ lệ điểm đất (chuẩn) | 42,1 % | 42,1 % |
+| CSF precision / recall / F1 | 0,999 / 1,000 / 0,999 | 0,999 / 1,000 / 0,999 |
+| PTD precision / recall / F1 | 0,999 / 0,999 / 0,999 | 0,999 / 0,997 / 0,998 |
+| DTM (CSF) bias / RMSE | +0,001 / 0,010 m | +0,001 / 0,011 m |
+| DTM (PTD) bias / RMSE | +0,001 / 0,010 m | +0,001 / 0,010 m |
+| Ô 1 m có điểm đất | 83,9 % | 83,8 % |
+| DSM bias / RMSE, trong 0,5 m | −0,28 / 1,51 m, 91,9 % | −0,28 / 1,51 m, 91,9 % |
+| CHM (CSF) bias / RMSE | −0,28 / 1,51 m | −0,28 / 1,51 m |
+| Ô có dữ liệu DSM | 100 % | 100 % |
+
+![Sai số DTM (CSF, PTD) và CHM, cảnh dốc](img/ground_eval_slope.png)
+
+Cách đọc kết quả:
+
+- **Bộ lọc gần như hoàn hảo** ở cả hai cảnh. Lý do là cảnh lý tưởng:
+  - mặt đất là mesh sạch, không có cây bụi thấp, không có nhiễu cự ly;
+  - tán cây bắt đầu ở vài mét trên mặt đất.
+
+  Vì vậy con số này kiểm tra quy trình và hình học, không phải độ khó của dữ liệu thật. Muốn đánh giá bộ lọc thật
+  sự cần thêm cây bụi, nhiễu và nhiều phản hồi.
+- **16 % số ô không có điểm đất** (dưới tán dày). DTM ở các ô đó là nội suy, nhưng vẫn đúng tới cm vì địa hình
+  trơn. Độ dốc 2,5° và các đồi ±8 m không làm kết quả kém đi.
+- **Sai số DSM/CHM nằm ở mép tán, không phải ở DTM.**
+  - Tán là hình nón cao tới 16 m trên bán kính khoảng 2,5 m, nên trong một ô 1 m độ cao đổi vài mét.
+  - Điểm LiDAR hiếm khi trúng đúng đỉnh nón, nên DSM thấp hơn chuẩn trung bình 0,28 m.
+  - 92 % số ô sai trong vòng 0,5 m. RMSE 1,5 m đến từ phần đuôi ở mép tán.
+  - CHM có cùng sai số với DSM, vì DTM chỉ sai khoảng 1 cm.
+- Cảnh dốc đã xuất bộ dữ liệu đầy đủ (`out/main_slope/export/`, LAZ, 725 MB).
+
+## 8. Còn lại
+
+- §9.6 đã xong (mục 7). Một bộ lọc đất có ý nghĩa trên dữ liệu khó hơn cần thêm cây bụi, nhiễu và nhiều phản hồi.
 - Nhiều phản hồi, footprint 0,21 m, cường độ phản xạ: tài liệu xếp ngoài phạm vi lý tưởng. `lidar_exact.py` đã
   dò tia trên mesh nên có thể mở rộng sang tia con trong footprint khi cần.
 - Động lực học thật của CW‑30E cần số liệu từ đội UAV (tài liệu §4, bảng "Khi cần UAV tự bay").

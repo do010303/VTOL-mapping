@@ -34,7 +34,7 @@ timeout 4000 python3 scripts/vtol_mission.py --alt "$ALT" --lines "$LINES" --spa
 tail -2 "$OUT/mission.log"
 kill -TERM $SITL; wait $SITL 2>/dev/null || true
 trap - EXIT
-cp "$(ls -t run/rootfs/log/*/*.ulg | head -1)" "$OUT/px4.ulg" 2>/dev/null || true
+cp "$(ls -t run/rootfs/log/*/*.ulg | head -1)" "$OUT/px4.ulg" 2>/dev/null && zstd -q --rm -10 "$OUT/px4.ulg" || true
 
 echo "$(date +%T) per-ray LiDAR"
 python3 scripts/lidar_exact.py "$OUT" > "$OUT/lidar_exact.log" 2>&1

@@ -46,7 +46,13 @@ def interp_poses(traj, t):
 def lidar_source(run, choice="auto"):
     """(sub-directory, exact): lidar_exact/ (scripts/lidar_exact.py: per-ray emission times, ray casting on the
     scene mesh) when it exists or is asked for, else lidar/ (the Gazebo gpu_lidar recording)."""
-    if choice == "exact" or (choice == "auto" and os.path.isdir(os.path.join(run, "lidar_exact"))):
+    d = os.path.join(run, "lidar_exact")
+    complete = os.path.exists(os.path.join(d, "stats.json"))       # written last: a stopped run has none
+    if choice == "exact" and not complete:
+        raise SystemExit(f"{d} is missing or incomplete: run  python3 scripts/lidar_exact.py {run}  to the end")
+    if choice == "auto" and os.path.isdir(d) and not complete:
+        print(f"warning: {d} is incomplete (lidar_exact.py stopped early), using the Gazebo recording", flush=True)
+    if choice == "exact" or (choice == "auto" and complete):
         return "lidar_exact", True
     return "lidar", False
 
@@ -89,6 +95,8 @@ def main():
     ap.add_argument("--eval", type=float, nargs=4, default=(-400, 400, -400, 400), metavar=("XMIN", "XMAX", "YMIN", "YMAX"),
                     help="evaluation area for coverage and DSM (spec 6/7: central 800 x 800 m)")
     ap.add_argument("--no-calibration", action="store_true", help="nominal scan angles instead of lidar_angles.json")
+    ap.add_argument("--tag", default="", help="appended to the output names (flight_report_exact_<tag>.md ...), "
+                                              "to keep several reports of one flight side by side")
     ap.add_argument("--lidar", choices=("auto", "gz", "exact"), default="auto",
                     help="auto: lidar_exact/ if it exists (scripts/lidar_exact.py), else the Gazebo recording")
     args = ap.parse_args()
@@ -99,7 +107,7 @@ def main():
     traj = np.loadtxt(os.path.join(run, "trajectory.csv"), delimiter=",", skiprows=1)
     traj = traj[np.concatenate([[True], np.diff(traj[:, 0]) > 0])]
     lidar_sub, exact = lidar_source(run, args.lidar)
-    sfx = "_exact" if exact else ""           # the Gazebo-recording report keeps its plain names
+    sfx = ("_exact" if exact else "") + (f"_{args.tag}" if args.tag else "")   # Gazebo report: plain names
     t, r = load_scans(run, lidar_sub)
     out = {"scene": truth.scene, "lidar_source": lidar_sub, "lines_total": int(len(t)),
            "pose_rate_hz": float(1 / np.median(np.diff(traj[:, 0])))}

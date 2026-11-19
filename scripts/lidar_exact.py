@@ -119,7 +119,7 @@ def main():
         t0 = time.time()
         buf_t, buf_r, k_file, done = [], [], 0, 0
         for f in os.listdir(out_dir):
-            if f.startswith("scans_"):
+            if f.startswith("scans_") or f == "stats.json":     # stats.json marks a finished run
                 os.remove(os.path.join(out_dir, f))
         for a in range(0, len(t_lines), args.chunk):
             tl = t_lines[a:a + args.chunk]
@@ -134,7 +134,7 @@ def main():
             buf_r.append(rng.reshape(len(tl), n_rays))
             done += len(tl)
             if sum(len(x) for x in buf_t) >= 2000 or done == len(t_lines):
-                np.savez(os.path.join(out_dir, f"scans_{k_file:04d}.npz"), t_s=np.concatenate(buf_t),
+                np.savez_compressed(os.path.join(out_dir, f"scans_{k_file:04d}.npz"), t_s=np.concatenate(buf_t),
                          ranges_m=np.concatenate(buf_r))
                 k_file += 1
                 buf_t, buf_r = [], []

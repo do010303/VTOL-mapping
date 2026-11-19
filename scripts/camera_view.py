@@ -147,6 +147,8 @@ def main():
             np.fmax.at(chm, (ij[inm, 1], ij[inm, 0]), hag[inm].astype(np.float32))
 
     def colour(z):
+        if np.size(z) == 0:                      # nothing scanned yet (below MIN_ALT): OpenCV rejects empty input
+            return np.zeros((0, 3), np.uint8)
         return cv2.applyColorMap(np.clip(z / 30 * 255, 0, 255).astype(np.uint8).reshape(-1, 1),
                                  cv2.COLORMAP_VIRIDIS)[:, 0]
 

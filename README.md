@@ -150,7 +150,21 @@ python3 scripts/lidar_map.py out/r5_main # chỉ dựng và lưu map
 
 Topic RViz (frame `map` = ENU thế giới): `/vtol/lidar/scan` (điểm của 1 s gần nhất), `/vtol/lidar/map` (voxel,
 màu theo độ cao trên mặt đất), `/vtol/lidar/ground`, `/vtol/path`, `/vtol/vehicle`, `/vtol/camera_footprint`.
-Khi dừng, map được lưu thành `lidar_map.npz`, `lidar_map.ply` (mở bằng CloudCompare/MeshLab) và `lidar_map.png`.
+Khi dừng, map được lưu thành `lidar_map.npz` và `lidar_map.png` (`--ply`: thêm `lidar_map.ply` cho
+CloudCompare/MeshLab).
+
+**Xem map 3D không cần RViz** (`scripts/view_cloud.py`, kiểu `view_map.py` của px4-mapping). Cửa sổ Open3D nền
+sáng: các lớp đất / cây bụi 0,5–5 m / tán (màu theo chiều cao), đường bay và các tuyến khảo sát có nhãn, vị trí và
+khung ảnh, lưới 100 m. Bảng bên phải có số liệu của map và của `flight_report` (nếu đã chạy), ô bật/tắt từng lớp, cỡ
+điểm, các góc nhìn và nút lưu ảnh.
+
+```bash
+python3 scripts/lidar_map.py out/<run>                     # một lần: dựng lidar_map.npz
+python3 scripts/view_cloud.py out/<run>                    # mặc định: vùng các dải quét của tuyến
+python3 scripts/view_cloud.py out/<run> --crop -100 100 -100 100 --max-points 0   # cận cảnh, mọi voxel
+python3 scripts/view_cloud.py out/<run> --whole --colour hits --theme dark --font-size 20
+python3 scripts/view_cloud.py out/<run> --png map.png      # chỉ lưu ảnh
+```
 
 **Kiểm tra ảnh cho SfM** (mục 6, 9.5): `python3 scripts/sfm_check.py out/<run>` ghép SIFT giữa các cặp ảnh dọc
 tuyến và ngang tuyến, rồi dùng pose thật để đếm cặp điểm khớp đúng hình học. `scripts/texture_pairs.sh` làm
@@ -162,10 +176,23 @@ việc đó với rig tĩnh (6 ảnh ở 600 m), để thử texture của một
 |---|---|
 | `trajectory.csv` | Pose 500 Hz + `strip_id` và cờ survey/transit |
 | `lidar/strip_*.npz` | Phép đo gốc theo dải |
-| `las/strip_*.las` | LAS 1.2 PDRF 1, gps_time = thời gian mô phỏng, point_source_id = dải; mặc định cắt theo vùng đánh giá + 100 m |
+| `las/strip_*.laz` | LAZ (LAS 1.2 PDRF 1, nén không mất dữ liệu, cần `pip install --user laspy lazrs`; `--las` để giữ LAS thường), gps_time = thời gian mô phỏng, point_source_id = dải; mặc định cắt theo vùng đánh giá + 100 m |
 | `truth/` | Nhãn đất/tán/mã cây, để riêng |
 | `colmap/sparse/0/` | Pose ảnh cho COLMAP |
 | `checks.json`, `coverage.png` | Mật độ, độ phủ, số ảnh nhìn thấy mỗi ô |
+
+**Tách đất, DTM / DSM / CHM** (`scripts/ground_eval.py`, mục 9.6). Lọc đất bằng CSF (`pip install --user
+cloth-simulation-filter`) và PTD (cài sẵn trong script) trên một mẫu con 10 điểm/m², dựng DTM 1 m từ điểm đất của
+mỗi bộ lọc, DSM từ điểm cao nhất mỗi ô, CHM = DSM − DTM, rồi so với dữ liệu chuẩn của cảnh: precision / recall / F1
+lớp đất, bias / RMSE / p95 của DTM, DSM, CHM, tỉ lệ ô có dữ liệu. Nhiều lượt bay (ví dụ cảnh phẳng và cảnh dốc) cho
+một bảng chung:
+
+```bash
+python3 scripts/ground_eval.py out/main_flat out/main_slope   # -> out/ground_eval.md, out/<run>/ground_eval.{json,png}
+```
+
+**So sánh nhiều cấu hình bay cùng một lượt:** `flight_report.py ... --tag <tên>` ghi
+`flight_report_exact_<tên>.md/json` để các báo cáo (ví dụ 1, 2, 10 tuyến) không ghi đè nhau.
 
 **Đồng bộ thời gian và hiệu chuẩn LiDAR.** Cần làm lại khi đổi số tia, góc quét hoặc phiên bản Gazebo:
 
@@ -189,7 +216,7 @@ Hai hiệu chuẩn này ghi vào `config/lidar_angles.json`. Các script báo c�
 | `sensors.json` | Mọi thông số camera/LiDAR, phép biến đổi gá, quy ước hệ trục |
 | `trajectory.csv` | t_s, x, y, z, qx, qy, qz, qw của thân (ENU, thế giới), 500 Hz |
 | `lidar/scans_*.npz` | `t_s` mỗi dòng, `scan_id`, `ranges_m` (dòng × 1333, float32, `inf` = không phản hồi) |
-| `camera/img_*.png`, `images.csv` | Ảnh RGB; image_id, t_s, pose thân lúc chụp, thời điểm trigger |
+| `camera/img_*.jpg` (hoặc `.png`), `images.csv` | Ảnh RGB; image_id, t_s, pose thân lúc chụp, thời điểm trigger |
 | `camera/camera_info.json` | K, kích thước, méo do Gazebo phát |
 | `cloud_line.npz` | (flight_report) xyz + t các điểm trên tuyến |
 | `lidar_exact/scans_*.npz` | (lidar_exact.py) như trên, tia k phát ở `t_s + k · pulse_spacing_s` |
@@ -201,6 +228,10 @@ Bản Gazebo: hướng tia k là d_L = chuẩn hóa(γ_k, sin β_k, −cos β_k)
 
 ## Lưu ý
 
+- **Dung lượng.** Một lượt 10 tuyến khoảng 3 GB (ảnh JPEG 1,4 GB, LiDAR nén ~0,5 GB, LAZ ~0,5 GB). Các script ghi
+  LiDAR dạng nén (`.npz` zip, ~5 lần nhỏ hơn) và LAZ; `px4.ulg` được nén zstd (`zstd -d px4.ulg.zst` để đọc).
+  `python3 scripts/compact_runs.py` (chạy thử) / `--apply` nén lại các lượt cũ trong `out/` mà không mất dữ liệu;
+  `--png-to-jpg 95` thêm chuyển ảnh PNG sang JPEG (có mất mát).
 - **Nhường sim khác.** Chỉ khởi động khi máy không có `gz sim`, sim px4-mapping, ArduPilot hay PX4 SITL nào khác.
   Nếu một sim khác khởi động giữa chừng, sim này tự dừng.
 - Gazebo chạy ở partition riêng `GZ_PARTITION=vtol_mapping` (`source env.sh` trước khi dùng `gz topic`), dưới tên

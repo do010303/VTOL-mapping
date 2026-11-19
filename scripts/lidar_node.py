@@ -92,7 +92,7 @@ class LidarRecorder:
     def _flush(self):
         if not self.t:
             return
-        np.savez(os.path.join(self.dir, f"scans_{self.n_chunks:04d}.npz"), t_s=np.array(self.t),
+        np.savez_compressed(os.path.join(self.dir, f"scans_{self.n_chunks:04d}.npz"), t_s=np.array(self.t),
                  scan_id=np.arange(self.lines - len(self.t), self.lines), ranges_m=np.stack(self.r))
         self.n_chunks += 1
         self.t, self.r = [], []
