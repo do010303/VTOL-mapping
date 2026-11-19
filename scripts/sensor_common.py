@@ -46,8 +46,9 @@ def quat_to_matrix(x, y, z, w):
 class PoseFeed:
     """World pose of one model over sim time, from the world's pose topics (T_WB of the spec)."""
 
-    def __init__(self, node, world, model, keep_s=30.0, log=None):
+    def __init__(self, node, world, model, keep_s=30.0, log=None, on_pose=None):
         self.model = model
+        self.on_pose = on_pose             # called with (t, p, q) for every new pose, outside the lock
         self.keep_s = keep_s
         self.t, self.p, self.q = [], [], []
         self.lock = threading.Lock()
@@ -72,6 +73,8 @@ class PoseFeed:
                     self.log.write(f"{t:.4f},{p.x:.4f},{p.y:.4f},{p.z:.4f},{q.x:.6f},{q.y:.6f},{q.z:.6f},{q.w:.6f}\n")
                 while self.t and self.t[0] < t - self.keep_s:
                     self.t.pop(0), self.p.pop(0), self.q.pop(0)
+            if self.on_pose is not None:
+                self.on_pose(t, np.array((p.x, p.y, p.z)), np.array((q.x, q.y, q.z, q.w)))
             return
 
     def latest(self):

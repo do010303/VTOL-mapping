@@ -16,7 +16,13 @@
 #   THR_MAX=0.6                        FW_THR_MAX (standard_vtol's default 0.6, cw30e 0.85)
 #   MIN_ALT=450                        the nodes record (LiDAR) and trigger (camera) above this altitude
 #   TRIGGER_BOX="-700 700 -700 700"    the camera fires only over this area (world x, y)
-#   IMG=jpg                            images as JPEG quality 95 (~4 MB) instead of PNG (~16 MB)
+#   IMG=jpg                            images as JPEG (IMG_QUALITY, default 85: ~3.4 MB) instead of PNG (~16 MB)
+#   IMG_SCALE=2                        write images 2x smaller than rendered (test runs: 2376 x 1584, ~1 MB);
+#                                      out/<run>/sensors.json then holds the scaled K
+#   ON_LINE=0                          trigger the camera on turns and run-ins too (default: only on the survey
+#                                      lines: course N/S within 10 deg, roll < 8 deg)
+#   TRIGGER_LINES="-95 0 95"           with ON_LINE: x of the planned lines; photos only within 20 m of one (else
+#                                      the straight leg back to the landing counts as a line; main_run sets it)
 #
 # PX4 runs as a daemon with its log in run/px4.log. Gazebo runs in partition vtol_mapping under the process
 # title vtol_mapping_gazebo; only what this script starts is stopped on exit (Ctrl+C or scripts/stop_sim.sh).
@@ -100,13 +106,21 @@ if [ "${NODES:-1}" != 0 ]; then
 import json, sys
 c = json.load(open(sys.argv[1]))
 c.update(scene=sys.argv[3], world=sys.argv[4], vehicle=sys.argv[5])
-json.dump(c, open(sys.argv[2], "w"), indent=2)' "$HERE/config/sensors_flight.json" "$OUT/sensors.json" "$SCENE" "$WORLD" "$MODEL"
+s, cam = int(sys.argv[6]), c["camera"]
+if s > 1:                     # images written s times smaller (camera_node.py --scale): the K of those files
+    cam.update(width=cam["width"] // s, height=cam["height"] // s, fx=cam["fx"] / s, fy=cam["fy"] / s,
+               cx=(cam["cx"] + 0.5) / s - 0.5, cy=(cam["cy"] + 0.5) / s - 0.5, written_scale=s)
+cam.update(jpeg_quality=int(sys.argv[7]), trigger_on_line=sys.argv[8] != "0")
+json.dump(c, open(sys.argv[2], "w"), indent=2)' "$HERE/config/sensors_flight.json" "$OUT/sensors.json" "$SCENE" "$WORLD" "$MODEL" \
+		"${IMG_SCALE:-1}" "${IMG_QUALITY:-85}" "${ON_LINE:-1}"
 	[ -f "$HERE/config/lidar_angles.json" ] && cp "$HERE/config/lidar_angles.json" "$OUT/"
 	$NODE_PY "$HERE/scripts/lidar_node.py" --world "$WORLD" --model ${MODEL}_0 --out "$OUT" \
 		--config "$HERE/config/sensors_flight.json" --min-alt "$MIN_ALT" > "$OUT/lidar_node.log" 2>&1 &
 	track $!
 	$NODE_PY "$HERE/scripts/camera_node.py" --world "$WORLD" --model ${MODEL}_0 --out "$OUT" \
-		--config "$HERE/config/sensors_flight.json" --trigger-every 60 --min-alt "$MIN_ALT" $TRIGGER_BOX_ARG --format "${IMG:-png}" > "$OUT/camera_node.log" 2>&1 &
+		--config "$HERE/config/sensors_flight.json" --trigger-every 60 --min-alt "$MIN_ALT" $TRIGGER_BOX_ARG --format "${IMG:-png}" \
+		--quality "${IMG_QUALITY:-85}" --scale "${IMG_SCALE:-1}" $([ "${ON_LINE:-1}" != 0 ] && echo --on-line) \
+		$([ -n "$TRIGGER_LINES" ] && echo --line-x $TRIGGER_LINES) > "$OUT/camera_node.log" 2>&1 &
 	track $!
 	# The camera view (preview camera) as a video: VIEW=0 to leave it out.
 	if [ "${VIEW:-1}" != 0 ]; then

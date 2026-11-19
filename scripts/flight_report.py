@@ -20,6 +20,7 @@ import os
 import cv2
 import numpy as np
 
+import fastcore  # noqa: E402  (C++ hot loops when built: cpp/build.sh)
 from scene import Truth, scene_of_run
 from static_report import image_file, lidar_dirs, load_scans, project, quat_to_matrix
 from strips import segment, strip_of_time
@@ -67,6 +68,14 @@ def world_points(cfg, t, r, traj, exact, calibrated=True, p=None, rot=None, chun
     d_b = d_l @ np.array(lc["R_BL"]).T
     t_bl = np.array(lc["t_BL"])
     n = r.shape[1]
+    if fastcore.NATIVE:                      # C++ (cpp/vtol_core.cpp): same maths, ~20-40x faster, no temporaries
+        step = lc["pulse_spacing_s"] if exact else 0.0
+        chunk = chunk or 5000
+        for a in range(0, len(t), chunk):
+            sl = slice(a, a + chunk)
+            xyz, tk = fastcore.world_points(t[sl], r[sl], traj, d_b, t_bl, step)
+            yield sl, xyz, tk, np.isfinite(r[sl])
+        return
     dt = lc["pulse_spacing_s"] * np.arange(n) if exact else np.zeros(n)
     chunk = chunk or (300 if exact else 2000)
     for a in range(0, len(t), chunk):
@@ -191,10 +200,8 @@ def main():
         jj = np.round((xyz[b, 0] - truth.x[0]) / cell).astype(np.int32)
         ii = np.round((xyz[b, 1] - truth.y[0]) / cell).astype(np.int32)
         flat[b] = ii * n + jj
-    dsm_c = np.full(n * n, -np.inf)
-    np.maximum.at(dsm_c, flat, z)
-    dtm_c = np.full(n * n, np.inf)                 # lowest return above the terrain, per cell
-    np.minimum.at(dtm_c, flat, zr)
+    dsm_c = fastcore.cell_reduce(flat, z, n * n, "max")
+    dtm_c = fastcore.cell_reduce(flat, zr, n * n, "min")       # lowest return above the terrain, per cell
     cnt = np.bincount(flat, minlength=n * n)
     seen = cnt > 0
     ex0, ex1, ey0, ey1 = args.eval

@@ -143,6 +143,9 @@ bị hệ thống dừng khi có VS Code và trình duyệt mở).
 | `scripts/ground_eval.py` | §9.6: CSF + PTD, DTM/DSM/CHM, một bảng cho nhiều cảnh |
 | `scripts/view_cloud.py` | Xem map 3D (Open3D, nền sáng, bảng số liệu, bật/tắt lớp) |
 | `scripts/compact_runs.py` | Nén lại các lượt trong `out/` không mất dữ liệu |
+| `cpp/vtol_core.cpp`, `scripts/fastcore.py` | Phần xử lý LiDAR bằng C++ (tia sang toạ độ thế giới, raster, voxel). Báo cáo 32 s → 13 s, map 85 s → 35 s; tự quay về NumPy nếu chưa build |
+| `scripts/scan_codec.py` | Cự ly LiDAR lưu theo mm, mã hoá chênh lệch giữa hai tia liền nhau (nhỏ hơn khoảng 4,5 lần, sai ≤ 0,5 mm) |
+| `camera_node.py` (`IMG_QUALITY`, `IMG_SCALE`, chỉ chụp trên tuyến) | Ảnh JPEG 85 và chỉ chụp trên tuyến; lượt thử 3 tuyến 918 MB → 451 MB, điểm khớp SfM không đổi |
 
 ## 7. Tách đất, DTM / DSM / CHM (§9.6)
 

@@ -36,6 +36,7 @@ from flight_report import interp_poses, lidar_source, world_points  # noqa: E402
 from scene import Truth, scene_of_run  # noqa: E402
 from static_report import ROOT, load_scans  # noqa: E402
 from strips import segment  # noqa: E402
+import fastcore  # noqa: E402
 
 GROUND_TOL = 0.05
 
@@ -191,9 +192,7 @@ def cell_index(xyz, xs, ys):
 def dsm_from(xyz, xs, ys):
     c = cell_index(xyz, xs, ys)
     k = c >= 0
-    out = np.full(len(xs) * len(ys), -np.inf)
-    np.maximum.at(out, c[k], xyz[k, 2].astype(np.float64))
-    out = out.reshape(len(ys), len(xs))
+    out = fastcore.cell_reduce(c[k], xyz[k, 2], len(xs) * len(ys), "max").reshape(len(ys), len(xs))
     return out, np.isfinite(out)
 
 

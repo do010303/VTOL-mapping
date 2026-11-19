@@ -2,14 +2,18 @@
 """Camera node: saves every image of the nadir camera with its sim time and pose.
 
 Writes to <out>/camera/:
-  img_<id>.png      RGB image (or .jpg with --format jpg: JPEG quality 95, spec 8 allows PNG or JPEG)
+  img_<id>.png      RGB image (or .jpg with --format jpg: JPEG, --quality, spec 8 allows PNG or JPEG);
+                    --scale 2 writes it at half the rendered size (test runs; K in camera_info.json scaled)
   images.csv        image_id, t_s, file, width, height, x_m, y_m, z_m, qx, qy, qz, qw (vehicle pose at t_s),
                     trigger_t_s (when the trigger for it was sent, flight only)
   camera_info.json  K, size, distortion as Gazebo publishes them
   stats.json        frames, rate, decode/write timing
 
 With --trigger-every D (flight model, camera on a trigger topic) the node fires the camera each
-time the vehicle has moved D metres horizontally (spec 3: every 60 m), while above --min-alt.
+time the vehicle has moved D metres horizontally (spec 3: every 60 m), while above --min-alt. The check runs on
+every pose message (500 Hz sim time), so the spacing does not depend on how fast the sim runs. With --on-line
+only while the vehicle flies a survey line: course north or south within 10 deg, roll under 8 deg (as
+scripts/strips.py finds the lines in the reports); the 60 m count restarts at each line.
 
   scripts/camera_node.py --world forest_static --model vtol_rig --out out/static_500 --duration 10
 """
@@ -34,13 +38,15 @@ from gz.transport13 import Node
 
 
 class CameraRecorder:
-    def __init__(self, cfg, out, poses, png_level=1, fmt="png"):
+    def __init__(self, cfg, out, poses, png_level=1, fmt="png", quality=85, scale=1):
         self.cfg = cfg["camera"]
         self.dir = os.path.join(out, "camera")
         os.makedirs(self.dir, exist_ok=True)
         self.poses = poses
         self.png_level = png_level
         self.fmt = fmt
+        self.quality = quality
+        self.scale = scale
         self.lock = threading.Lock()
         self.n = 0
         self.first_t = self.last_t = None
@@ -58,8 +64,12 @@ class CameraRecorder:
     def on_info(self, msg):
         if self.info is None:
             k = list(msg.intrinsics.k)
-            self.info = {"width": msg.width, "height": msg.height, "K": [k[0:3], k[3:6], k[6:9]],
-                         "distortion": list(msg.distortion.k)}
+            s = self.scale
+            if s > 1:                     # the written images are s times smaller: pixel centres (x + 0.5) / s - 0.5
+                k = [k[0] / s, 0.0, (k[2] + 0.5) / s - 0.5, 0.0, k[4] / s, (k[5] + 0.5) / s - 0.5, 0.0, 0.0, 1.0]
+            self.info = {"width": msg.width // s, "height": msg.height // s, "K": [k[0:3], k[3:6], k[6:9]],
+                         "distortion": list(msg.distortion.k), "rendered_size": [msg.width, msg.height],
+                         "scale": s}
             with open(os.path.join(self.dir, "camera_info.json"), "w") as f:
                 json.dump(self.info, f, indent=2)
 
@@ -93,8 +103,12 @@ class CameraRecorder:
                 time.sleep(0.05)
                 pose = self.poses.at(t)
             img = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3)
+            if self.scale > 1:
+                img = cv2.resize(img, (w // self.scale, h // self.scale), interpolation=cv2.INTER_AREA)
+                h, w = img.shape[:2]
             name = f"img_{image_id:05d}.{self.fmt}"
-            opts = [cv2.IMWRITE_JPEG_QUALITY, 95] if self.fmt == "jpg" else [cv2.IMWRITE_PNG_COMPRESSION, self.png_level]
+            opts = [cv2.IMWRITE_JPEG_QUALITY, self.quality] if self.fmt == "jpg" else \
+                [cv2.IMWRITE_PNG_COMPRESSION, self.png_level]
             cv2.imwrite(os.path.join(self.dir, name), img[:, :, ::-1], opts)
             p, q = pose if pose is not None else ((np.nan,) * 3, (np.nan,) * 4)
             self.csv.write(f"{image_id},{t:.4f},{name},{w},{h},{p[0]:.4f},{p[1]:.4f},{p[2]:.4f},"
@@ -132,45 +146,74 @@ def main():
     ap.add_argument("--min-alt", type=float, default=300, help="only trigger above this altitude, m")
     ap.add_argument("--trigger-box", type=float, nargs=4, metavar=("XMIN", "XMAX", "YMIN", "YMAX"),
                     help="only trigger while the vehicle is inside this area (world x, y), m")
-    ap.add_argument("--format", choices=("png", "jpg"), default="png", help="image files (jpg: quality 95)")
+    ap.add_argument("--format", choices=("png", "jpg"), default="png", help="image files")
+    ap.add_argument("--quality", type=int, default=85, help="JPEG quality")
+    ap.add_argument("--scale", type=int, default=1, help="write images this many times smaller (test runs)")
+    ap.add_argument("--on-line", action="store_true", help="trigger only on survey lines (N/S course, level)")
+    ap.add_argument("--line-x", type=float, nargs="*", help="with --on-line: x of the planned lines (within 20 m)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     node = Node()
-    poses = PoseFeed(node, args.world, args.model)
-    rec = CameraRecorder(cfg, args.out, poses, fmt=args.format)
+    trig = {"last_xy": None, "off_since": None, "pub": None}
+    sin_course, sin_roll = np.sin(np.radians(10.0)), np.sin(np.radians(8.0))
+
+    def on_pose(t, p, q):
+        """Camera trigger, on every pose (sim time). Phase of the D m spacing kept through short gate drops."""
+        if trig["pub"] is None:
+            return
+        box = args.trigger_box
+        ok = p[2] >= args.min_alt and (box is None or (box[0] <= p[0] <= box[1] and box[2] <= p[1] <= box[3]))
+        if ok and args.on_line:
+            back = poses.at(t - 1.0)
+            if back is None:
+                ok = False
+            else:
+                v = p[:2] - back[0][:2]
+                sp = np.hypot(*v)
+                x, y, z, w = q
+                roll_s = 2 * (y * z + w * x)                       # R[2, 1]: sin(roll) for small pitch
+                ok = sp > 5 and abs(v[0]) < sin_course * sp and abs(roll_s) < sin_roll
+                if ok and args.line_x:
+                    # Within 20 m of a planned line (scripts/strips.py max_offset): the straight leg back to the
+                    # landing also runs north-south over the area.
+                    ok = min(abs(p[0] - lx) for lx in args.line_x) <= 20.0
+        if not ok:
+            if trig["off_since"] is None:
+                trig["off_since"] = t
+            elif t - trig["off_since"] > 2.0:
+                trig["last_xy"] = None                             # next line: the count starts again
+            return
+        trig["off_since"] = None
+        last = trig["last_xy"]
+        d = np.hypot(*(p[:2] - last)) if last is not None else None
+        if last is None or d >= args.trigger_every:
+            # The spacing point, not where this pose happened to be (at 500 Hz and 25 m/s: 5 cm past it).
+            trig["last_xy"] = p[:2].copy() if last is None else last + (p[:2] - last) * args.trigger_every / d
+            with rec.lock:
+                rec.pending_triggers.append(t)
+            trig["pub"].publish(Boolean(data=True))
+
+    poses = PoseFeed(node, args.world, args.model, on_pose=on_pose)
+    rec = CameraRecorder(cfg, args.out, poses, fmt=args.format, quality=args.quality, scale=args.scale)
     c = cfg["camera"]
     if not node.subscribe(Image, c["topic"], rec.on_image):
         sys.exit(f"failed to subscribe to {c['topic']}")
     node.subscribe(CameraInfo, c["info_topic"], rec.on_info)
-    trig_pub = node.advertise(c["trigger_topic"], Boolean) if args.trigger_every else None
+    trig["pub"] = node.advertise(c["trigger_topic"], Boolean) if args.trigger_every else None
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     print(f"camera_node: recording {c['topic']} -> {rec.dir}", flush=True)
-    last_xy = None
     first_sim = None
     last_print = time.monotonic()
-    while not stop.wait(0.01):
+    while not stop.wait(0.05):
         cur = poses.latest()
         if cur is not None:
-            t, p, _ = cur
-            first_sim = t if first_sim is None else first_sim
-            if args.duration and t - first_sim >= args.duration:
+            first_sim = cur[0] if first_sim is None else first_sim
+            if args.duration and cur[0] - first_sim >= args.duration:
                 break
-            box = args.trigger_box
-            in_box = box is None or (box[0] <= p[0] <= box[1] and box[2] <= p[1] <= box[3])
-            if trig_pub and p[2] >= args.min_alt and in_box:
-                if last_xy is None or np.hypot(*(p[:2] - last_xy)) >= args.trigger_every:
-                    # Trigger at the spacing point, not where this poll happened to be.
-                    last_xy = p[:2].copy() if last_xy is None else \
-                        last_xy + (p[:2] - last_xy) * args.trigger_every / np.hypot(*(p[:2] - last_xy))
-                    with rec.lock:
-                        rec.pending_triggers.append(t)
-                    trig_pub.publish(Boolean(data=True))
-            elif trig_pub:
-                last_xy = None
         if args.max_frames and rec.n >= args.max_frames:
             time.sleep(0.5)
             break

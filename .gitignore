@@ -3,3 +3,4 @@ run/
 models/forest*/
 __pycache__/
 *.pyc
+scripts/*.so

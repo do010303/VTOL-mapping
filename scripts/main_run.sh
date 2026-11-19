@@ -4,11 +4,13 @@
 #
 #   scripts/main_run.sh                                   # forest (flat), CW-30E-sized airframe
 #   WORLD=forest_slope OUT=out/main_slope scripts/main_run.sh
-#   LINES=3 GUI=1 scripts/main_run.sh                     # the spec's 3-line system check, watched
+#   PROFILE=test LINES=3 GUI=1 scripts/main_run.sh        # the spec's 3-line system check, watched
 #   EXPORT=1 IMG=png VEHICLE=standard_vtol scripts/main_run.sh
 #
 #   WORLD    forest | forest_slope | forest_1400           OUT     result folder (default out/main_<world>_<time>)
 #   VEHICLE  cw30e | standard_vtol                          IMG     jpg (default, quality 95) | png
+#   PROFILE=test   images 2x smaller (IMG_SCALE=2, ~1 MB each) for system checks; main (default): full size
+#   IMG_QUALITY (JPEG, default 85), ON_LINE=0 (also photograph turns and run-ins)
 #   LINES, SPACING, ALT (600), EXPORT=1 (LAZ + COLMAP into <OUT>/export; off by default: ~0.7 GB, and
 #   python3 scripts/export_dataset.py <OUT> makes it any time later), GUI=1 (watch it)
 set -e
@@ -23,6 +25,8 @@ mkdir -p "$OUT"
 PLANNED=$(python3 -c "n, s = $LINES, $SPACING; print(' '.join(f'{-(n - 1) / 2 * s + k * s:g}' for k in range(n)))")
 
 echo "$(date +%T) flight: $WORLD, $LINES lines x $SPACING m at $ALT m -> $OUT"
+[ "${PROFILE:-main}" = test ] && export IMG_SCALE="${IMG_SCALE:-2}"
+export TRIGGER_LINES="$PLANNED"
 WORLD="$WORLD" OUT="$OUT" VIEW="${VIEW:-0}" IMG="${IMG:-jpg}" MIN_ALT=$(( ALT - 50 )) TRIGGER_BOX="-700 700 -700 700" \
 	./run_sitl.sh > "$OUT/sitl.log" 2>&1 &
 SITL=$!
@@ -36,7 +40,9 @@ timeout 4000 python3 scripts/vtol_mission.py --alt "$ALT" --lines "$LINES" --spa
 tail -2 "$OUT/mission.log"
 kill -TERM $SITL; wait $SITL 2>/dev/null || true
 trap - EXIT
-cp "$(ls -t run/rootfs/log/*/*.ulg | head -1)" "$OUT/px4.ulg" 2>/dev/null && zstd -q --rm -10 "$OUT/px4.ulg" || true
+# Move (not copy) the flight's PX4 log into the run folder and compress it: the original would stay in run/rootfs.
+ULG="$(ls -t run/rootfs/log/*/*.ulg 2>/dev/null | head -1)"
+[ -n "$ULG" ] && mv "$ULG" "$OUT/px4.ulg" && zstd -q --rm -10 "$OUT/px4.ulg" || true
 
 echo "$(date +%T) per-ray LiDAR"
 python3 scripts/lidar_exact.py "$OUT" > "$OUT/lidar_exact.log" 2>&1

@@ -63,6 +63,9 @@ class LidarMap:
         self.pending = []
         self.points = 0
         self.lock = threading.Lock()
+        import fastcore
+        # C++ voxel / column hash maps (cpp/vtol_core.cpp) when built: points go in as they come, no re-sorting
+        self.native = fastcore.VoxelMap(voxel, GROUND_CELL) if fastcore.VoxelMap is not None else None
 
     @staticmethod
     def _key(i, j, k=None):
@@ -83,10 +86,23 @@ class LidarMap:
 
     def add(self, xyz):
         with self.lock:
-            self.pending.append(np.asarray(xyz, dtype=np.float64))
+            if self.native is not None:
+                self.native.add(np.ascontiguousarray(xyz, dtype=np.float64))
+            else:
+                self.pending.append(np.asarray(xyz, dtype=np.float64))
             self.points += len(xyz)
 
     def merge(self):
+        if self.native is not None:
+            with self.lock:                      # the C++ add releases the GIL: no add while we read the maps
+                keys, hits = self.native.voxels()
+                ck, zmin, zmax = self.native.columns()
+            ground = self._ground_grid(ck, zmin)
+            with self.lock:
+                self.keys, self.hits = keys, hits
+                self.ckeys, self.zmin, self.zmax = ck, zmin, zmax
+                self.ground = ground
+            return
         with self.lock:
             if not self.pending:
                 return
@@ -113,6 +129,12 @@ class LidarMap:
             self.keys, self.hits = uk, hits
             self.ckeys, self.zmin, self.zmax = sk[starts], zmin, zmax
             self.ground = ground
+
+    def n_voxels(self):
+        return self.native.n_voxels if self.native is not None else len(self.keys)
+
+    def n_columns(self):
+        return self.native.n_columns if self.native is not None else len(self.ckeys)
 
     def _ground_grid(self, ckeys, zmin):
         """(i0, j0, grid) of the ground estimate: per 1 m cell, the lowest return within GROUND_WINDOW."""
@@ -183,12 +205,18 @@ class LidarMap:
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(1, 2, figsize=(13, 6))
             gnd = self.ground_at(x, y)
+            # The columns are a 1 m grid: an image of it (a scatter of millions of points took ~50 s).
+            ix = np.floor(x / GROUND_CELL).astype(np.int64)
+            iy = np.floor(y / GROUND_CELL).astype(np.int64)
+            ext = (ix.min() * GROUND_CELL, (ix.max() + 1) * GROUND_CELL, iy.min() * GROUND_CELL, (iy.max() + 1) * GROUND_CELL)
             for a, val, title, cm, lim in ((ax[0], zmax - gnd, "canopy height (highest return - ground estimate), m",
                                             "viridis", (0, 30)),
                                            (ax[1], gnd, "ground estimate (lowest return within 11 m), m",
                                             "terrain", None)):
-                s = a.scatter(x, y, c=val, s=0.05, cmap=cm, vmin=lim[0] if lim else None, vmax=lim[1] if lim else None,
-                              rasterized=True)
+                img = np.full((iy.max() - iy.min() + 1, ix.max() - ix.min() + 1), np.nan)
+                img[iy - iy.min(), ix - ix.min()] = val
+                s = a.imshow(img, origin="lower", extent=ext, cmap=cm, interpolation="nearest",
+                             vmin=lim[0] if lim else None, vmax=lim[1] if lim else None)
                 a.set_aspect("equal")
                 a.set_title(title, fontsize=10)
                 a.set_xlabel("x east (m)")
@@ -399,7 +427,8 @@ def main():
     while not stop.is_set():
         time.sleep(0.2)
         now = time.monotonic()
-        if now - last_pub >= args.publish_period:
+        if rv is not None and now - last_pub >= args.publish_period:
+            # Only for RViz: rebuilding the whole map every 2 s cost most of a replay's time (saved at the end anyway).
             last_pub = now
             lmap.merge()
             if rv is not None:
@@ -426,8 +455,8 @@ def main():
                 rv.rclpy.spin_once(rv.node, timeout_sec=0)
         if now - last_print >= 5 and not state.get("told"):      # quiet once the replay has finished
             last_print = now
-            print(f"t {state['t'] or 0:8.1f} s  points {lmap.points:,}  voxels {len(lmap.keys):,}  "
-                  f"columns {len(lmap.ckeys):,}", flush=True)
+            print(f"t {state['t'] or 0:8.1f} s  points {lmap.points:,}  voxels {lmap.n_voxels():,}  "
+                  f"columns {lmap.n_columns():,}", flush=True)
         if state.get("done"):
             if rv is None:
                 break

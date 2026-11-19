@@ -8,7 +8,7 @@ nguyên bản, mọi thứ nằm trong thư mục này.
 - Kết quả kiểm tra khả thi: [docs/ket_qua_kha_thi.md](docs/ket_qua_kha_thi.md)
 - Giai đoạn 2 (GUI, camera view, bay đủ chu trình, 600 m / 10 tuyến, xuất dữ liệu): [docs/ke_hoach_chay.md](docs/ke_hoach_chay.md)
 - Giai đoạn 3 (khớp tài liệu: rừng 2 km phẳng + dốc, LiDAR 600 kHz với thời điểm từng tia, máy bay cỡ CW‑30E,
-  map 3D + RViz): [docs/ket_qua_giai_doan_3.md](docs/ket_qua_giai_doan_3.md)
+  map 3D + RViz, §9.6 tách đất, xem point cloud, lưu trữ gọn, C++): [docs/ket_qua_giai_doan_3.md](docs/ket_qua_giai_doan_3.md)
 
 Repo này là thư mục `examples/VTOL-mapping` của PX4-Autopilot: clone nó vào đúng chỗ đó, vì các script dùng
 PX4 ở `../..` (bản build SITL, model `standard_vtol` và airframe 4004):
@@ -20,6 +20,62 @@ cd PX4-Autopilot/examples && git clone git@github.com:do010303/VTOL-mapping.git
 Mọi lệnh chạy trong `examples/VTOL-mapping/`. Không có trong repo (sinh lại hoặc tự tạo khi chạy): `models/forest*/`
 (`scripts/make_forest.py`), `out/`, `run/`.
 
+## Bắt đầu nhanh
+
+Mỗi bước một lệnh, chạy trong `examples/VTOL-mapping/`. Các phần sau của README giải thích chi tiết.
+
+**1. Chuẩn bị (một lần, khoảng 5 phút)**
+
+```bash
+python3 scripts/make_forest.py                                       # rừng phẳng 2 × 2 km
+python3 scripts/make_forest.py --terrain slope --name forest_slope   # rừng dốc
+python3 scripts/make_models.py                                       # máy bay, world, config/
+cpp/build.sh                                                         # phần xử lý LiDAR bằng C++ (nhanh hơn)
+pip install --user laspy lazrs cloth-simulation-filter               # LAZ và CSF
+```
+
+**2. Bay thử 3 tuyến** (khoảng 25 phút, khoảng 0,4 GB). Đây là bước kiểm tra hệ thống của §7, ảnh lưu ở 1/4 cỡ:
+
+```bash
+PROFILE=test LINES=3 GUI=1 scripts/main_run.sh       # GUI=1: mở Gazebo; bỏ đi để chạy nhanh hơn
+scripts/camera_window.sh                             # (tuỳ chọn, terminal khác) camera + panel LiDAR khi đang bay
+```
+
+**3. Bay cấu hình chính** (10 tuyến, 600 m, 25 m/s; khoảng 35 phút, khoảng 1,3 GB):
+
+```bash
+scripts/main_run.sh                                  # rừng phẳng
+WORLD=forest_slope scripts/main_run.sh               # rừng dốc
+```
+
+`main_run.sh` tự làm hết một lượt: bay, dừng sim, dò lại từng tia (`lidar_exact`), viết báo cáo, kiểm tra SfM,
+dựng map 3D. Kết quả nằm trong `out/main_<world>_<thời gian>/` (hoặc `out/<OUT>`).
+
+**4. Xem kết quả** (sau khi mô phỏng đã dừng)
+
+```bash
+python3 scripts/view_cloud.py                        # point cloud 3D của lượt mới nhất (cách nên dùng)
+less out/<run>/flight_report_exact.md                # báo cáo: tuyến bay, mật độ, độ phủ, DSM, ảnh
+scripts/lidar_rviz.sh                                # (tuỳ chọn) phát lại trên RViz, chỉ khi sim đã dừng
+```
+
+**5. Đánh giá và xuất dữ liệu (khi cần)**
+
+```bash
+python3 scripts/ground_eval.py out/<run phẳng> out/<run dốc>   # §9.6: CSF/PTD, DTM/DSM/CHM, một bảng chung
+python3 scripts/export_dataset.py out/<run> --lines 10         # §8: LAZ + COLMAP vào out/<run>/export/
+```
+
+**6. Dọn dẹp**
+
+```bash
+scripts/stop_sim.sh                                  # dừng sim (chỉ các tiến trình ví dụ này đã khởi động)
+python3 scripts/compact_runs.py --apply              # nén lại các lượt cũ trong out/, không mất dữ liệu
+```
+
+Không chạy RViz hay một sim thứ hai cùng lúc với sim đang bay. Muốn theo dõi khi bay thì dùng Gazebo GUI và
+`camera_window.sh`.
+
 ## Chuẩn bị (một lần)
 
 Cần: PX4 SITL đã build (`build/px4_sitl_mapping` hoặc `build/px4_sitl_default`), Gazebo Harmonic, Python với numpy,
@@ -29,7 +85,24 @@ opencv, pillow, matplotlib, scipy, pymavlink.
 python3 scripts/make_forest.py                                   # rừng phẳng 2 × 2 km (seed 2026), ~1 phút, 600 MB
 python3 scripts/make_forest.py --terrain slope --name forest_slope   # rừng dốc 2,5° + đồi ±8 m, 750 MB
 python3 scripts/make_models.py      # payload, máy bay (cw30e_mapping, standard_vtol_mapping), world, config/
+cpp/build.sh                        # phần xử lý LiDAR bằng C++ (pybind11 + OpenMP; apt: python3-pybind11)
+pip install --user laspy lazrs cloth-simulation-filter   # LAZ, CSF (§9.6)
 ```
+
+`cpp/build.sh` build `cpp/vtol_core.cpp` thành `scripts/vtol_core*.so`. Thư viện này làm các vòng lặp nặng:
+- đổi từng tia sang toạ độ thế giới, với pose nội suy đúng thời điểm của tia;
+- gom điểm vào các ô raster (DSM/DTM);
+- cộng dồn voxel cho map 3D.
+
+Không build thì các script chạy cùng phép tính bằng NumPy (`scripts/fastcore.py`), kết quả như nhau (lệch dưới
+0,02 mm), chỉ chậm hơn. Đo trên lượt 3 tuyến:
+
+| Bước | NumPy | C++ |
+|---|---|---|
+| Báo cáo bay | 32 s, 3,4 GB RAM | 13 s, 2,9 GB |
+| Map 3D | 119 s, 8,3 GB RAM | 35 s, 2,7 GB |
+
+`VTOL_NO_NATIVE=1` ép chạy bằng NumPy.
 
 Cảnh (mục 6 của tài liệu):
 
@@ -79,7 +152,12 @@ Một lệnh cho cấu hình chính của tài liệu (600 m, 25 m/s, 10 tuyến
 ```bash
 scripts/main_run.sh                                    # rừng phẳng -> out/main_forest_<thời gian>/
 WORLD=forest_slope scripts/main_run.sh                 # rừng dốc
+PROFILE=test LINES=3 GUI=1 scripts/main_run.sh         # kiểm tra hệ thống 3 tuyến (§7), ảnh 1/4, có GUI
+EXPORT=1 scripts/main_run.sh                           # kèm xuất LAZ + COLMAP (hoặc export_dataset.py sau)
 ```
+
+Ước tính dung lượng: lượt chính 10 tuyến khoảng 1,3 GB, lượt thử 3 tuyến khoảng 0,3 GB. Phần lớn là ảnh: JPEG 85,
+chỉ chụp trên tuyến.
 
 Hoặc từng bước, hai terminal:
 
@@ -107,7 +185,13 @@ python3 scripts/export_dataset.py out/flight_<thời gian> --lines 10 --spacing 
   - `THR_MAX`: giới hạn ga.
   - `MIN_ALT`: các node chỉ ghi và kích chụp ở trên độ cao này.
   - `TRIGGER_BOX`: camera chỉ chụp trong vùng này.
-  - `VIEW=0`: không ghi video camera view. `IMG=jpg`: ảnh JPEG chất lượng 95 (~4 MB) thay vì PNG (~16 MB).
+  - `VIEW=0`: không ghi video camera view. `IMG=jpg`: ảnh JPEG thay vì PNG (~16 MB). `IMG_QUALITY`: chất lượng JPEG
+    (mặc định 85, khoảng 3,4 MB). Thử trên lượt 3 tuyến: số điểm SfM khớp không đổi so với chất lượng 95 (6,2 MB).
+  - `IMG_SCALE=2`: ghi ảnh nhỏ hơn 2 lần, 2376 × 1584, khoảng 1 MB. `sensors.json` của lượt chạy ghi K đã chia
+    tương ứng.
+  - `ON_LINE=0`: chụp cả khi quay đầu và vào tuyến. Mặc định chỉ chụp trên tuyến: hướng bay bắc/nam lệch ≤ 10°,
+    nghiêng cánh < 8°, mốc 60 m bắt đầu lại ở đầu mỗi tuyến. Điều kiện kích chụp được xét ở mỗi pose (500 Hz thời
+    gian mô phỏng), nên khoảng cách chụp không phụ thuộc tốc độ chạy của mô phỏng.
 - Thời gian bay: 1 tuyến ở 500 m khoảng 14 phút; 10 tuyến ở 600 m khoảng 30 phút.
 - Khi có GUI, mô phỏng chạy ở khoảng 0,5 lần thời gian thực (không GUI: 0,9).
 
@@ -142,22 +226,24 @@ cáo khi đó có hậu tố `_exact`.
 **Map 3D và RViz** (`scripts/lidar_map.py`, giống `ground_map.py` của px4-mapping). Node ghép point cloud thành
 map voxel (mặc định 1 m), ước lượng mặt đất (điểm thấp nhất trong 11 m) và chiều cao tán, chỉ từ dữ liệu LiDAR:
 
+RViz chỉ chạy **sau khi mô phỏng xong**, riêng một mình. Script tự từ chối nếu đang có `gz sim` chạy. Để theo dõi
+trong lúc bay, dùng `scripts/camera_window.sh`: panel LiDAR của cửa sổ này có bản đồ nhìn từ trên.
+
 ```bash
-scripts/lidar_rviz.sh                    # trực tiếp, cạnh ./run_sitl.sh đang chạy: node + RViz
-scripts/lidar_rviz.sh out/main_flat 20     # phát lại một lượt bay, nhanh gấp 20
-python3 scripts/lidar_map.py out/main_flat # chỉ dựng và lưu map
+scripts/lidar_rviz.sh                        # phát lại lượt bay mới nhất trong out/, nhanh gấp 20
+scripts/lidar_rviz.sh out/main_flat 20       # một lượt cụ thể
+python3 scripts/lidar_map.py out/main_flat   # chỉ dựng và lưu map, không mở RViz
 ```
 
-> **Lưu ý về RViz.** RViz2 không chịu được map lớn. Với một lượt 3–10 tuyến (vài triệu voxel gửi mỗi 2 s), nó đã
-> tắt đột ngột giữa chừng mà không ghi lỗi (19/11/2026). Node `lidar_map.py` vẫn chạy và vẫn lưu map khi dừng,
-> chỉ cửa sổ RViz mất. Vì vậy:
+> **Lưu ý về RViz.** RViz2 không chịu được map lớn. Ngày 19/11/2026, khi chạy song song với mô phỏng và map tăng
+> lên vài triệu voxel gửi mỗi 2 s, nó đã tắt đột ngột mà không ghi lỗi. Node `lidar_map.py` vẫn lưu map khi
+> dừng, chỉ cửa sổ RViz bị mất. Vì vậy:
 >
-> - Xem kết quả sau chuyến bay bằng `scripts/view_cloud.py` (bên dưới), không qua RViz.
-> - RViz chỉ để xem quét trực tiếp trong lúc bay, và nên giảm tải:
+> - Chỉ phát lại sau chuyến bay, không chạy song song với mô phỏng.
+> - Mặc định gửi tối đa 1 triệu voxel (`--max-publish`). Map rất lớn thì giảm thêm:
 >   `MAP_ARGS="--every 4 --publish-period 5 --max-publish 500000" scripts/lidar_rviz.sh`.
->   Mặc định `--max-publish` đã hạ từ 3 triệu xuống 1 triệu voxel.
-> - Nếu RViz tắt, chạy lại `scripts/lidar_rviz.sh`, hoặc dùng cửa sổ camera (`scripts/camera_window.sh`). Panel
->   LiDAR của cửa sổ camera có bản đồ nhìn từ trên, nhẹ hơn nhiều.
+> - Chỉ cần xem map đã dựng (không cần phát lại theo thời gian) thì dùng `scripts/view_cloud.py` (bên dưới):
+>   nhẹ hơn và không cần ROS.
 
 Topic RViz (frame `map` = ENU thế giới): `/vtol/lidar/scan` (điểm của 1 s gần nhất), `/vtol/lidar/map` (voxel,
 màu theo độ cao trên mặt đất), `/vtol/lidar/ground`, `/vtol/path`, `/vtol/vehicle`, `/vtol/camera_footprint`.
