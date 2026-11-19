@@ -16,8 +16,8 @@ the climb, sparse and far out; --whole shows them too. A label above the map giv
 how much of the area the LiDAR reached the ground in, canopy height, and the flight report's (swath, points/m^2,
 coverage, DSM accuracy, photo overlaps) when scripts/flight_report.py has run.
 
-  python3 scripts/lidar_map.py out/<run>                  # once: builds lidar_map.npz
-  python3 scripts/view_cloud.py out/<run>                 # the viewer
+  python3 scripts/view_cloud.py                           # the newest flight under out/
+  python3 scripts/view_cloud.py out/<run>                 # this one (builds lidar_map.npz first if missing)
   python3 scripts/view_cloud.py out/<run> --crop -100 100 -100 100 --max-points 0   # one block, every voxel
   python3 scripts/view_cloud.py out/<run> --colour hits   # vegetation/canopy by returns per voxel instead
   python3 scripts/view_cloud.py out/<run> --png map.png   # a picture, no window
@@ -26,6 +26,7 @@ Mouse: left drag turns, wheel zooms, shift + left drag (or middle) pans. The pan
 ticks layers on and off and sets point size and lighting.
 """
 import argparse
+import glob
 import json
 import os
 import sys
@@ -34,6 +35,7 @@ import numpy as np
 from matplotlib import colormaps
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from flight_report import interp_poses  # noqa: E402
 from strips import segment  # noqa: E402
@@ -99,7 +101,9 @@ def build(run, a):
         traj = traj[np.concatenate([[True], np.diff(traj[:, 0]) > 0])]
         ts = np.arange(traj[0, 0], traj[-1, 0], 0.2)
         pp, rot = interp_poses(traj, ts)
-        _, strips = segment(ts, pp, rot, a.y_range, min_frac=0.5)
+        # The report's lines when there is one (else a straight transit, e.g. the way back to land, looks like one).
+        planned = [st["x_nominal"] for st in report.get("strips", [])] or None
+        _, strips = segment(ts, pp, rot, a.y_range, min_frac=0.5, planned_x=planned)
     if not a.crop and not a.whole and strips:
         # The survey area: what the lines' swaths cover (the map also holds the turns' and the climb's scans,
         # sparse, far out, with a poor ground estimate).
@@ -462,7 +466,7 @@ class Viewer:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run")
+    ap.add_argument("run", nargs="?", help="a flight under out/ (default: the newest one)")
     ap.add_argument("--colour", choices=("height", "hits"), default="height",
                     help="vegetation and canopy by height above ground (default) or by LiDAR returns per voxel")
     ap.add_argument("--crop", type=float, nargs=4, metavar=("X0", "X1", "Y0", "Y1"),
@@ -479,8 +483,19 @@ def main():
     a = ap.parse_args()
     a.user_crop = a.crop
 
+    if not a.run:
+        runs = [d for d in glob.glob(os.path.join(ROOT, "out", "*"))
+                if os.path.exists(os.path.join(d, "trajectory.csv"))]
+        if not runs:
+            sys.exit("no flight under out/")
+        a.run = max(runs, key=os.path.getmtime)
+        print(f"newest flight: {os.path.relpath(a.run, ROOT)}")
     if not os.path.exists(os.path.join(a.run, "lidar_map.npz")):
-        sys.exit(f"{a.run}/lidar_map.npz missing: run  python3 scripts/lidar_map.py {a.run}  first")
+        # First time: build the map (scripts/lidar_map.py, survey altitude only, every 2nd ray), ~1-2 min.
+        print("no lidar_map.npz yet: building it (scripts/lidar_map.py) ...", flush=True)
+        import subprocess
+        subprocess.run([sys.executable, os.path.join(HERE, "lidar_map.py"), a.run, "--every", "2",
+                        "--min-alt", "300"], check=True)
     geoms, labels, stats, text, box, info = build(a.run, a)
     print(text)
     if a.png:

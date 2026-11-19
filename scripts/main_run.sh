@@ -4,11 +4,13 @@
 #
 #   scripts/main_run.sh                                   # forest (flat), CW-30E-sized airframe
 #   WORLD=forest_slope OUT=out/main_slope scripts/main_run.sh
-#   EXPORT=0 IMG=png VEHICLE=standard_vtol scripts/main_run.sh
+#   LINES=3 GUI=1 scripts/main_run.sh                     # the spec's 3-line system check, watched
+#   EXPORT=1 IMG=png VEHICLE=standard_vtol scripts/main_run.sh
 #
 #   WORLD    forest | forest_slope | forest_1400           OUT     result folder (default out/main_<world>_<time>)
 #   VEHICLE  cw30e | standard_vtol                          IMG     jpg (default, quality 95) | png
-#   LINES, SPACING, ALT (600), EXPORT (1: LAS + COLMAP into <OUT>/export), GUI=1 (watch it)
+#   LINES, SPACING, ALT (600), EXPORT=1 (LAZ + COLMAP into <OUT>/export; off by default: ~0.7 GB, and
+#   python3 scripts/export_dataset.py <OUT> makes it any time later), GUI=1 (watch it)
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
@@ -45,7 +47,7 @@ echo "$(date +%T) SfM check"
 python3 scripts/sfm_check.py "$OUT" > "$OUT/sfm_check.log" 2>&1 || echo "sfm_check failed"
 echo "$(date +%T) 3D map"
 python3 scripts/lidar_map.py "$OUT" --every 2 --min-alt $(( ALT - 50 )) > "$OUT/lidar_map.log" 2>&1 || echo "lidar_map failed"
-if [ "${EXPORT:-1}" != 0 ]; then
+if [ "${EXPORT:-0}" != 0 ]; then
 	echo "$(date +%T) export"
 	python3 scripts/export_dataset.py "$OUT" --planned-x $PLANNED > "$OUT/export.log" 2>&1 || echo "export failed"
 fi

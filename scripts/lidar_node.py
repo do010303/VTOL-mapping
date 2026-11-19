@@ -2,7 +2,7 @@
 """LiDAR node: records every scan line of the nadir line scanner with its sim time.
 
 Writes to <out>/lidar/:
-  scans_<k>.npz     t_s (line time), scan_id, ranges_m (n_lines x rays, float32; inf = no return)
+  scans_<k>.npz     t_s (line time), scan_id, ranges (n_lines x rays, mm deltas: scripts/scan_codec.py)
   stats.json        lines received, rate in sim and wall time, gaps, return ratio, range statistics
 
 and <out>/trajectory.csv (the vehicle's pose stream, if --model is given). Ray directions follow from
@@ -24,6 +24,7 @@ import time
 from sensor_common import PoseFeed, load_config, stamp_s   # first: protobuf backend
 
 import numpy as np
+import scan_codec
 from gz.msgs10.laserscan_pb2 import LaserScan
 from gz.transport13 import Node
 
@@ -92,8 +93,8 @@ class LidarRecorder:
     def _flush(self):
         if not self.t:
             return
-        np.savez_compressed(os.path.join(self.dir, f"scans_{self.n_chunks:04d}.npz"), t_s=np.array(self.t),
-                 scan_id=np.arange(self.lines - len(self.t), self.lines), ranges_m=np.stack(self.r))
+        scan_codec.save(os.path.join(self.dir, f"scans_{self.n_chunks:04d}.npz"), np.stack(self.r),
+                        t_s=np.array(self.t), scan_id=np.arange(self.lines - len(self.t), self.lines))
         self.n_chunks += 1
         self.t, self.r = [], []
 

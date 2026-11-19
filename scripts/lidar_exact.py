@@ -14,7 +14,7 @@ The pose at t is interpolated linearly (position) and normalised-linearly (quate
 samples. Thin geometric rays, first hit, no noise: the spec's ideal model. Line times t_l are those of the Gazebo
 recording (same scan lines, so the two can be compared ray by ray); --synth makes lines at lines_per_s instead.
 
-  <run>/lidar_exact/scans_<k>.npz   t_s (line start), ranges_m (lines x rays, float32, inf = no return)
+  <run>/lidar_exact/scans_<k>.npz   t_s (line start), ranges (lines x rays, mm deltas: scripts/scan_codec.py)
   <run>/lidar_exact/stats.json      counts, timing, comparison with the Gazebo recording
 
   python3 scripts/lidar_exact.py out/r5_main                    # scene from <run>/sensors.json
@@ -31,6 +31,7 @@ import numpy as np
 from flight_report import interp_poses
 from scene import Truth, scene_of_run
 from static_report import load_scans
+import scan_codec
 
 
 def load_obj_triangles(path):
@@ -134,8 +135,8 @@ def main():
             buf_r.append(rng.reshape(len(tl), n_rays))
             done += len(tl)
             if sum(len(x) for x in buf_t) >= 2000 or done == len(t_lines):
-                np.savez_compressed(os.path.join(out_dir, f"scans_{k_file:04d}.npz"), t_s=np.concatenate(buf_t),
-                         ranges_m=np.concatenate(buf_r))
+                scan_codec.save(os.path.join(out_dir, f"scans_{k_file:04d}.npz"), np.concatenate(buf_r),
+                                t_s=np.concatenate(buf_t))
                 k_file += 1
                 buf_t, buf_r = [], []
             if a // args.chunk % 50 == 0:

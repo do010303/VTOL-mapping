@@ -6,7 +6,8 @@
   python3 scripts/compact_runs.py out/r5_main --apply
 
 Per run:
-  lidar/, lidar_exact/, export/lidar/ *.npz   rewritten zip-compressed (lossless, ~5x smaller; np.load reads both)
+  lidar/, lidar_exact/ scans_*.npz            ranges as mm deltas, zip-compressed (scripts/scan_codec.py: within 0.5 mm)
+  export/lidar/ *.npz                         rewritten zip-compressed (lossless; np.load reads both)
   lidar_map.ply                               removed: the same voxels are in lidar_map.npz
                                               (scripts/view_cloud.py, or lidar_map.py --ply to write it again)
   px4.ulg                                     -> px4.ulg.zst (zstd, lossless; `zstd -d px4.ulg.zst` to read it)
@@ -23,6 +24,9 @@ import zipfile
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scan_codec  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -36,7 +40,28 @@ def is_compressed(path):
         return all(i.compress_type == zipfile.ZIP_DEFLATED for i in z.infolist())
 
 
+def to_codec(path):
+    """A scans_<k>.npz with float32 ranges_m -> mm deltas (scripts/scan_codec.py), checked to 0.5 mm."""
+    d = np.load(path)
+    data = {k: d[k] for k in d.files if k != "ranges_m"}
+    r = d["ranges_m"]
+    tmp = path + ".tmp.npz"
+    scan_codec.save(tmp, r, **data)
+    back = scan_codec.load(tmp)["ranges_m"]
+    fin = np.isfinite(r)
+    if not (np.array_equal(fin, np.isfinite(back)) and np.all(np.abs(back[fin] - r[fin]) <= 0.00051)):
+        os.remove(tmp)
+        raise RuntimeError(f"{path}: ranges differ after encoding")
+    os.replace(tmp, path)
+
+
+def needs_codec(path):
+    return os.path.basename(path).startswith("scans_") and "ranges_m" in np.load(path).files
+
+
 def recompress_npz(path):
+    if needs_codec(path):
+        return to_codec(path)
     d = np.load(path)
     data = {k: d[k] for k in d.files}
     tmp = path + ".tmp.npz"
@@ -90,7 +115,7 @@ def main():
     for run in runs:
         npz = [p for sub in ("lidar", "lidar_exact", os.path.join("export", "lidar"))
                for p in sorted(glob.glob(os.path.join(run, sub, "*.npz")))]
-        npz = [p for p in npz if not is_compressed(p)]
+        npz = [p for p in npz if not is_compressed(p) or needs_codec(p)]
         ply = [p for p in [os.path.join(run, "lidar_map.ply")] if os.path.exists(p) and
                os.path.exists(os.path.join(run, "lidar_map.npz"))]
         ulg = [p for p in [os.path.join(run, "px4.ulg")] if os.path.exists(p)]

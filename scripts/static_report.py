@@ -21,6 +21,8 @@ import os
 import cv2
 import numpy as np
 
+import scan_codec
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -36,7 +38,7 @@ def quat_to_matrix(x, y, z, w):
 def load_scans(d, sub="lidar"):
     t, r = [], []
     for f in sorted(glob.glob(os.path.join(d, sub, "scans_*.npz"))):
-        z = np.load(f)
+        z = scan_codec.load(f)
         t.append(z["t_s"])
         r.append(z["ranges_m"])
     if not t:

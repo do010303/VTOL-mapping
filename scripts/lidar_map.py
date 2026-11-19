@@ -299,7 +299,8 @@ def main():
     ap.add_argument("--min-alt", type=float, default=100, help="only lines while the vehicle is above this, m")
     ap.add_argument("--lidar", choices=("auto", "gz", "exact"), default="auto")
     ap.add_argument("--publish-period", type=float, default=2.0, help="s between map updates in RViz")
-    ap.add_argument("--max-publish", type=int, default=3_000_000, help="voxels sent to RViz at most")
+    ap.add_argument("--max-publish", type=int, default=1_000_000,
+                    help="voxels sent to RViz at most (RViz dies on big clouds: 3 M crashed it)")
     args = ap.parse_args()
     if not args.live and not args.run:
         ap.error("a run directory, or --live")

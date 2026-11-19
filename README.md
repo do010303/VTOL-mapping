@@ -144,23 +144,35 @@ map voxel (mặc định 1 m), ước lượng mặt đất (điểm thấp nh�
 
 ```bash
 scripts/lidar_rviz.sh                    # trực tiếp, cạnh ./run_sitl.sh đang chạy: node + RViz
-scripts/lidar_rviz.sh out/r5_main 20     # phát lại một lượt bay, nhanh gấp 20
-python3 scripts/lidar_map.py out/r5_main # chỉ dựng và lưu map
+scripts/lidar_rviz.sh out/main_flat 20     # phát lại một lượt bay, nhanh gấp 20
+python3 scripts/lidar_map.py out/main_flat # chỉ dựng và lưu map
 ```
+
+> **Lưu ý về RViz.** RViz2 không chịu được map lớn. Với một lượt 3–10 tuyến (vài triệu voxel gửi mỗi 2 s), nó đã
+> tắt đột ngột giữa chừng mà không ghi lỗi (19/11/2026). Node `lidar_map.py` vẫn chạy và vẫn lưu map khi dừng,
+> chỉ cửa sổ RViz mất. Vì vậy:
+>
+> - Xem kết quả sau chuyến bay bằng `scripts/view_cloud.py` (bên dưới), không qua RViz.
+> - RViz chỉ để xem quét trực tiếp trong lúc bay, và nên giảm tải:
+>   `MAP_ARGS="--every 4 --publish-period 5 --max-publish 500000" scripts/lidar_rviz.sh`.
+>   Mặc định `--max-publish` đã hạ từ 3 triệu xuống 1 triệu voxel.
+> - Nếu RViz tắt, chạy lại `scripts/lidar_rviz.sh`, hoặc dùng cửa sổ camera (`scripts/camera_window.sh`). Panel
+>   LiDAR của cửa sổ camera có bản đồ nhìn từ trên, nhẹ hơn nhiều.
 
 Topic RViz (frame `map` = ENU thế giới): `/vtol/lidar/scan` (điểm của 1 s gần nhất), `/vtol/lidar/map` (voxel,
 màu theo độ cao trên mặt đất), `/vtol/lidar/ground`, `/vtol/path`, `/vtol/vehicle`, `/vtol/camera_footprint`.
 Khi dừng, map được lưu thành `lidar_map.npz` và `lidar_map.png` (`--ply`: thêm `lidar_map.ply` cho
 CloudCompare/MeshLab).
 
-**Xem map 3D không cần RViz** (`scripts/view_cloud.py`, kiểu `view_map.py` của px4-mapping). Cửa sổ Open3D nền
+**Xem map 3D không cần RViz** (`scripts/view_cloud.py`, kiểu `view_map.py` của px4-mapping). Đây là cách xem
+point cloud nên dùng (xem lưu ý về RViz ở trên). Cửa sổ Open3D nền
 sáng: các lớp đất / cây bụi 0,5–5 m / tán (màu theo chiều cao), đường bay và các tuyến khảo sát có nhãn, vị trí và
 khung ảnh, lưới 100 m. Bảng bên phải có số liệu của map và của `flight_report` (nếu đã chạy), ô bật/tắt từng lớp, cỡ
 điểm, các góc nhìn và nút lưu ảnh.
 
 ```bash
-python3 scripts/lidar_map.py out/<run>                     # một lần: dựng lidar_map.npz
-python3 scripts/view_cloud.py out/<run>                    # mặc định: vùng các dải quét của tuyến
+python3 scripts/view_cloud.py                              # lượt bay mới nhất trong out/
+python3 scripts/view_cloud.py out/<run>                    # lượt này; lần đầu tự dựng lidar_map.npz (~1–2 phút)
 python3 scripts/view_cloud.py out/<run> --crop -100 100 -100 100 --max-points 0   # cận cảnh, mọi voxel
 python3 scripts/view_cloud.py out/<run> --whole --colour hits --theme dark --font-size 20
 python3 scripts/view_cloud.py out/<run> --png map.png      # chỉ lưu ảnh
@@ -215,7 +227,7 @@ Hai hiệu chuẩn này ghi vào `config/lidar_angles.json`. Các script báo c�
 |---|---|
 | `sensors.json` | Mọi thông số camera/LiDAR, phép biến đổi gá, quy ước hệ trục |
 | `trajectory.csv` | t_s, x, y, z, qx, qy, qz, qw của thân (ENU, thế giới), 500 Hz |
-| `lidar/scans_*.npz` | `t_s` mỗi dòng, `scan_id`, `ranges_m` (dòng × 1333, float32, `inf` = không phản hồi) |
+| `lidar/scans_*.npz` | `t_s` mỗi dòng, `scan_id`, cự ly dòng × 1333 tia lưu theo mm, mã hoá chênh lệch giữa hai tia liền nhau (`scripts/scan_codec.py`; sai ≤ 0,5 mm, nhỏ hơn float32 khoảng 4,5 lần). Đọc bằng `scan_codec.load()`, trả về `ranges_m` float32, `inf` = không phản hồi. File cũ dạng `ranges_m` vẫn đọc được |
 | `camera/img_*.jpg` (hoặc `.png`), `images.csv` | Ảnh RGB; image_id, t_s, pose thân lúc chụp, thời điểm trigger |
 | `camera/camera_info.json` | K, kích thước, méo do Gazebo phát |
 | `cloud_line.npz` | (flight_report) xyz + t các điểm trên tuyến |

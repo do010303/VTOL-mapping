@@ -16,6 +16,8 @@ import sys
 
 import numpy as np
 
+import scan_codec
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -23,7 +25,7 @@ d = sys.argv[1]
 cfg = json.load(open(os.path.join(ROOT, "config", "sensors.json")))["lidar"]
 run = json.load(open(os.path.join(d, "run.json")))
 assert run["world"] == "flat_static", "calibrate on flat_static"
-r = np.concatenate([np.load(f)["ranges_m"] for f in sorted(glob.glob(os.path.join(d, "lidar", "scans_*.npz")))])
+r = np.concatenate([scan_codec.load(f)["ranges_m"] for f in sorted(glob.glob(os.path.join(d, "lidar", "scans_*.npz")))])
 assert np.allclose(r, r[0]), "the lines differ: is the rig static?"
 z_l = run["height_m"] + cfg["t_BL"][2]
 nominal = np.radians(np.linspace(cfg["scan_min_deg"], cfg["scan_max_deg"], cfg["rays_per_line"]))
